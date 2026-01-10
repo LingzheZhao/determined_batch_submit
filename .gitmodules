@@ -1,0 +1,6 @@
+[submodule "upstream/determined-examples"]
+	path = upstream/determined-examples
+	url = https://github.com/determined-ai/determined-examples/
+[submodule "upstream/determined"]
+	path = upstream/determined
+	url = https://github.com/determined-ai/determined/

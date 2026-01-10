@@ -1,0 +1,35 @@
+name: "toy-matrix-loop-6000ada"
+description: "Toy matrix workload for Determined (6000 Ada pool)"
+workspace: "default"
+project: "toy"
+labels: ["toy", "matrix", "6000ada"]
+
+resources:
+  slots_per_trial: 1
+  resource_pool: "128c256t_1536_6000Ada"
+
+environment:
+  image: "harbor.cvgl.lab/library/lzzhao-isaac-lab-from-scratch:5.0.0_0f00ca2_torch2.8.0_250901_3"
+  environment_variables:
+    - PYTHONUNBUFFERED=1
+
+# Update host_path to match your shared home (for example: /workspace/<user>/).
+bind_mounts:
+  - host_path: /workspace/peter/
+    container_path: /run/determined/workdir/home
+
+# Update the project path of remote.
+entrypoint: >
+  bash -lc "cd /run/determined/workdir/home/determined_batch_submit/scripts/examples/toy_example && python3 train.py --size 64 --sleep 0.2 --log-every 1"
+
+searcher:
+  name: single
+  metric: "loss"
+  smaller_is_better: true
+  max_length:
+    batches: 1000000000
+
+checkpoint_storage:
+  type: shared_fs
+  host_path: /UNSAFE_SSD4/shared_fs
+  storage_path: determined-checkpoints

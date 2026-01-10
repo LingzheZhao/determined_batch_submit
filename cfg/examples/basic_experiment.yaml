@@ -1,0 +1,19 @@
+# Minimal Determined config used for the CLI examples.
+# Replace the docker image and entrypoint with your own training code.
+name: "example-experiment"
+description: "Example configuration submitted via determined-batch"
+workspace: "default"
+project: "demo"
+labels: []
+
+resources:
+  slots_per_trial: 1
+  max_slots: 1
+
+environment:
+  image: "docker.io/your/image:tag"
+  environment_variables:
+    - PYTHONUNBUFFERED=1
+
+entrypoint: >
+  python3 train.py
