@@ -1,0 +1,114 @@
+name: "rebuild-lafan1-rollouts-vae-batch-reboot-v2"
+description: "Convert LAFAN1 VAE rollout NPZs to HDF5 and rebuild reboot-v2 schema"
+labels: ["dm1", "dataset", "reboot_v2", "lafan1"]
+workspace: "default"
+project: "dm1_dataset_build"
+
+resources:
+  slots_per_trial: 1
+  priority: 5
+  resource_pool: "48c96t_512_3090"
+  shm_size: 65536
+
+environment:
+  environment_variables:
+    - PYTHONUNBUFFERED=1
+    - NVIDIA_VISIBLE_DEVICES=all
+    - NVIDIA_DRIVER_CAPABILITIES=all
+  image: "harbor.cvgl.lab/library/lzzhao-isaac-lab-from-scratch:5.0.0_0f00ca2_torch2.8.0_250901_3"
+
+bind_mounts:
+  - host_path: /workspace/lzzhao/
+    container_path: /run/determined/workdir/home/
+  - host_path: /UNSAFE_SSD4/
+    container_path: /run/determined/workdir/UNSAFE_SSD4/
+  - host_path: /datasets/
+    container_path: /run/determined/workdir/data/
+
+searcher:
+  name: single
+  metric: "dataset_build_done"
+  smaller_is_better: false
+
+entrypoint: |
+  set -eu
+  set -x
+
+  ROLLOUT_DIR="/run/determined/workdir/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/rollouts"
+  OUT_DIR="/run/determined/workdir/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/hdf5_reboot_v2"
+  LOG_DIR="${OUT_DIR}/logs"
+  mkdir -p "${OUT_DIR}" "${LOG_DIR}"
+
+  ROLLOUT_HDF5="${OUT_DIR}/diffusion_lafan1_rollouts_vae_batch_57m.hdf5"
+  REBOOT_HDF5="${OUT_DIR}/diffusion_lafan1_rollouts_vae_batch_reboot_v2_57m.hdf5"
+
+  SCRIPT_ROOT=""
+  for CANDIDATE in \
+    "/run/determined/workdir/home/hmnd_ws/whole_body_tracking/determined_batch_submit/scripts/data" \
+    "/run/determined/workdir/scripts/data" \
+    "/scripts/data" \
+    "./scripts/data"
+  do
+    if [ -f "${CANDIDATE}/convert_rollouts_to_hdf5.py" ] && [ -f "${CANDIDATE}/rebuild_reboot_v2_from_rollout_hdf5.py" ]; then
+      SCRIPT_ROOT="${CANDIDATE}"
+      break
+    fi
+  done
+  CONVERT_SCRIPT="${SCRIPT_ROOT}/convert_rollouts_to_hdf5.py"
+  REBUILD_SCRIPT="${SCRIPT_ROOT}/rebuild_reboot_v2_from_rollout_hdf5.py"
+
+  if [ -z "${SCRIPT_ROOT}" ]; then
+    echo "ERROR: expected scripts not found in mounted or packaged paths"
+    find /run/determined/workdir -maxdepth 6 -type f -name "convert_rollouts_to_hdf5.py" 2>/dev/null || true
+    find / -maxdepth 5 -type f -name "convert_rollouts_to_hdf5.py" 2>/dev/null || true
+    exit 1
+  fi
+  ls -ld "${SCRIPT_ROOT}" || true
+  ls -l "${CONVERT_SCRIPT}" "${REBUILD_SCRIPT}" || true
+  chmod a+r "${CONVERT_SCRIPT}" "${REBUILD_SCRIPT}" || true
+  ls -l "${CONVERT_SCRIPT}" "${REBUILD_SCRIPT}" || true
+
+  python "${CONVERT_SCRIPT}" \
+    --input_dir "${ROLLOUT_DIR}" \
+    --output_file "${ROLLOUT_HDF5}" \
+    --traj_key traj \
+    --state_key state \
+    --extra_keys action \
+    --require_extra_keys \
+    --chunk_size 2048 \
+    --compression gzip \
+    --compression_level 1 > "${LOG_DIR}/convert_rollouts_to_hdf5.log" 2>&1
+  cat "${LOG_DIR}/convert_rollouts_to_hdf5.log"
+
+  python "${REBUILD_SCRIPT}" \
+    --input_hdf5 "${ROLLOUT_HDF5}" \
+    --output_hdf5 "${REBOOT_HDF5}" \
+    --cond_steps 3 \
+    --horizon_steps 16 \
+    --chunk_size 8192 \
+    --compression gzip \
+    --compression_level 1 > "${LOG_DIR}/rebuild_reboot_v2.log" 2>&1
+  cat "${LOG_DIR}/rebuild_reboot_v2.log"
+
+  python - <<'PY'
+  import h5py
+  rollout = "/run/determined/workdir/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/hdf5_reboot_v2/diffusion_lafan1_rollouts_vae_batch_57m.hdf5"
+  reboot = "/run/determined/workdir/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/hdf5_reboot_v2/diffusion_lafan1_rollouts_vae_batch_reboot_v2_57m.hdf5"
+  with h5py.File(rollout, "r") as f:
+      print("[ROLLOUT_HDF5]", rollout)
+      print("num_samples", int(f.attrs.get("num_samples", -1)))
+      print("keys", sorted(list(f.keys())))
+  with h5py.File(reboot, "r") as f:
+      print("[REBOOT_V2_HDF5]", reboot)
+      print("num_samples", int(f.attrs.get("num_samples", -1)))
+      print("cmd_dim", int(f.attrs.get("cmd_dim", -1)))
+      for k in ["action", "state", "cmd", "state_hist", "cmd_hist", "state_delta", "recovery_flag"]:
+          d = f[k]
+          print(k, d.shape, str(d.dtype))
+  PY
+
+  echo "dataset_build_done: 1.0"
+
+checkpoint_storage:
+  type: shared_fs
+  host_path: /UNSAFE_SSD4/shared_fs/determined-checkpoints/
