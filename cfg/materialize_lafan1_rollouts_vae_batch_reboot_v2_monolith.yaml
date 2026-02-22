@@ -1,0 +1,96 @@
+name: "materialize-lafan1-rollouts-vae-batch-reboot-v2-monolith"
+description: "Materialize reboot-v2 VDS/shards into one physical monolithic HDF5"
+labels: ["dm1", "dataset", "reboot_v2", "lafan1", "materialize"]
+workspace: "default"
+project: "dm1_dataset_build"
+
+resources:
+  slots_per_trial: 1
+  priority: 5
+  resource_pool: "48c96t_512_3090"
+  shm_size: 65536
+
+environment:
+  environment_variables:
+    - PYTHONUNBUFFERED=1
+    - NVIDIA_VISIBLE_DEVICES=all
+    - NVIDIA_DRIVER_CAPABILITIES=all
+  image: "harbor.cvgl.lab/library/lzzhao-isaac-lab-from-scratch:5.0.0_0f00ca2_torch2.8.0_250901_3"
+
+bind_mounts:
+  - host_path: /workspace/lzzhao/
+    container_path: /run/determined/workdir/home/
+  - host_path: /UNSAFE_SSD4/
+    container_path: /run/determined/workdir/UNSAFE_SSD4/
+  - host_path: /datasets/
+    container_path: /run/determined/workdir/data/
+
+searcher:
+  name: single
+  metric: "dataset_build_done"
+  smaller_is_better: false
+
+entrypoint: |
+  set -eu
+  set -x
+
+  ROOT_DIR="/run/determined/workdir/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch"
+  IN_DIR="${ROOT_DIR}/hdf5_reboot_v2_mp8"
+  LOG_DIR="${IN_DIR}/logs"
+  mkdir -p "${LOG_DIR}"
+
+  INPUT_VDS="${IN_DIR}/diffusion_lafan1_rollouts_vae_batch_reboot_v2_57m_vds.hdf5"
+  SHARD_DIR="${IN_DIR}/reboot_v2_shards"
+  OUTPUT_FILE="${IN_DIR}/diffusion_lafan1_rollouts_vae_batch_reboot_v2_57m.hdf5"
+
+  SCRIPT_ROOT=""
+  for CANDIDATE in \
+    "/run/determined/workdir/home/hmnd_ws/whole_body_tracking/determined_batch_submit/scripts/data" \
+    "/run/determined/workdir/scripts/data" \
+    "/scripts/data" \
+    "./scripts/data"
+  do
+    if [ -f "${CANDIDATE}/materialize_reboot_v2_vds_to_hdf5.py" ]; then
+      SCRIPT_ROOT="${CANDIDATE}"
+      break
+    fi
+  done
+
+  if [ -z "${SCRIPT_ROOT}" ]; then
+    echo "ERROR: materialize script not found"
+    find /run/determined/workdir -maxdepth 6 -type f -name "materialize_reboot_v2_vds_to_hdf5.py" 2>/dev/null || true
+    exit 1
+  fi
+
+  SCRIPT="${SCRIPT_ROOT}/materialize_reboot_v2_vds_to_hdf5.py"
+  chmod a+r "${SCRIPT}" || true
+  ls -l "${SCRIPT}" || true
+
+  python "${SCRIPT}" \
+    --input_vds_hdf5 "${INPUT_VDS}" \
+    --shard_dir "${SHARD_DIR}" \
+    --output_hdf5 "${OUTPUT_FILE}" \
+    --chunk_size 8192 \
+    --compression gzip \
+    --compression_level 1 \
+    --overwrite > "${LOG_DIR}/materialize_reboot_v2_monolith.log" 2>&1
+  cat "${LOG_DIR}/materialize_reboot_v2_monolith.log"
+
+  python - <<'PY'
+  import h5py
+  out_file = "/run/determined/workdir/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/hdf5_reboot_v2_mp8/diffusion_lafan1_rollouts_vae_batch_reboot_v2_57m.hdf5"
+  with h5py.File(out_file, "r") as f:
+      print("[REBOOT_V2_MONOLITH]", out_file)
+      print("num_samples", int(f.attrs.get("num_samples", -1)))
+      print("materialized_from_vds", bool(f.attrs.get("materialized_from_vds", False)))
+      print("keys", sorted(list(f.keys())))
+      for k in ["action", "state", "cmd", "state_hist", "cmd_hist", "state_delta", "recovery_flag"]:
+          d = f[k]
+          print(k, d.shape, str(d.dtype), "is_virtual=", bool(getattr(d, "is_virtual", False)))
+  PY
+
+  echo "dataset_build_done: 1.0"
+
+checkpoint_storage:
+  type: shared_fs
+  host_path: /UNSAFE_SSD4/shared_fs/determined-checkpoints/
