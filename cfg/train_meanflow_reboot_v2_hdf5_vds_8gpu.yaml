@@ -421,7 +421,7 @@ entrypoint: |
       "name": "beyondmimic_pre_meanflow_hdf5_vds_reboot_v2_h${horizon_steps}_j${num_joints}",
       "logdir": "${oc.env:REINFLOW_LOG_DIR}/beyondmimic/pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}",
       "train_dataset_paths": [
-          "/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/hdf5_reboot_v2_mp8/diffusion_lafan1_rollouts_vae_batch_reboot_v2_57m_vds.hdf5"
+          "/UNSAFE_SSD4/HUMAN_DATA/LAFAN1_rollouts_vae_batch/hdf5_reboot_v2_mp8/reboot_v2_shards/*.hdf5"
       ],
       "flow_ratio": 0.5,
       "ratio_r_not_equal_t": 0.5,
@@ -597,7 +597,7 @@ entrypoint: |
   python -m torch.distributed.run --nproc_per_node 8 -m agent.pretrain.train_meanflow_humanoid \
     --config-path "${CFG_DIR}" \
     --config-name meanflow_hdf5_vds_reboot_v2 \
-    "train_dataset_paths=[\"${DATA_HDF5}\"]" \
+    "train_dataset_paths=[\"${SHARD_DIR}/*.hdf5\"]" \
     "train.n_epochs=1000" \
     "train.batch_size=32" \
     "train.learning_rate=1e-4" \
