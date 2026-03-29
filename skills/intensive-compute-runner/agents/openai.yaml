@@ -1,0 +1,7 @@
+interface:
+  display_name: "Intensive Compute Runner"
+  short_description: "Prefer Determined shell or experiments first; local is only a constrained fallback."
+  default_prompt: "Use $intensive-compute-runner to run this heavy task with Determined cluster priority: shell for interactive debugging, experiments for long-running or batch work, and local fallback only when a non-multi-GPU task requires GPU but the cluster has no free slots."
+
+policy:
+  allow_implicit_invocation: true
