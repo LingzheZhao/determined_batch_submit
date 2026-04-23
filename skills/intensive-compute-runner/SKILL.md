@@ -8,12 +8,12 @@ description: Use when a task is GPU-intensive, CPU-intensive, long-running, memo
 ## Overview
 
 - Default to Determined AI cluster execution for heavy GPU or CPU work.
-- Prefer the `determined_batch_submit` package and its `determined-batch` CLI; if it is missing, install it before inventing ad hoc submission flows.
+- Prefer the configured Determined submission helper and its `determined-batch` CLI; if it is missing, install or activate the project-approved helper before inventing ad hoc submission flows.
 - Treat CPU-only heavy jobs as cluster candidates too; prefer `slots_per_trial: 0` before using the local machine.
 - Use Determined AI shell for interactive debugging and short iterative investigation on cluster GPUs.
 - Use Determined AI experiments for long-running jobs, batch sweeps, tuning, ablations, rendering, and queued submissions.
 - Multi-GPU work must run on the Determined cluster; queue and wait if necessary instead of moving it local.
-- Sync runnable code and configs into `/UNSAFE_SSD4` before cluster submission so containers can read the same files from `/run/determined/workdir/UNSAFE_SSD4`.
+- Sync runnable code and configs into cluster-visible shared storage before submission so containers can read the same files from the configured container mount path.
 - Fall back to local execution only when GPU is required, the task is not multi-GPU, and the cluster does not currently have enough free GPU slots.
 - Prefer asynchronous submission and report experiment IDs, shell sessions, config paths, and logs instead of blocking the terminal on long runs.
 
@@ -42,38 +42,41 @@ description: Use when a task is GPU-intensive, CPU-intensive, long-running, memo
 
 ### 2. Prepare Determined tooling and auth
 
-- Prefer the `determined-batch` CLI from `https://github.com/LingzheZhao/determined_batch_submit`.
+- Prefer the project-approved `determined-batch` CLI or equivalent Determined submission wrapper.
 - If it is not installed, install it first:
-  - `git clone https://github.com/LingzheZhao/determined_batch_submit`
-  - `cd determined_batch_submit`
+  - obtain the configured submission helper repository or package
+  - enter that helper's project directory
   - `python -m pip install -e .`
-- Use `~/.config/determined_batch/.secrets.env` for authentication via `--secrets-file` or `DETERMINED_BATCH_SECRETS`.
-- If `DET_MASTER` is not set, follow the repository README and export it before submitting.
+- Use the configured secrets file for authentication via `--secrets-file` or `DETERMINED_BATCH_SECRETS`.
+- If `DET_MASTER` is not set, follow the project-local Determined helper documentation and export it before submitting.
 - Never print secret values; reference only variable names, paths, and command forms.
 - Treat this skill as the default Codex policy for heavy compute work: future tasks should prefer this path unless the user explicitly asks for a different execution location.
 
-### 3. Sync code into `/UNSAFE_SSD4`
+### 3. Sync code into shared storage
 
-- Sync the runnable code, configs, helper scripts, and lightweight assets into a dedicated directory such as `/UNSAFE_SSD4/${USER}/codex_jobs/<task-name>/`.
-- In the cluster, that path is available under `/run/determined/workdir/UNSAFE_SSD4/...`.
+- Sync the runnable code, configs, helper scripts, and lightweight assets into a dedicated task directory under the configured shared storage root.
+- In the cluster, that path must be available under the corresponding configured container mount root.
 - Prefer `rsync` into a dedicated target directory. Use `--delete` only when the destination is clearly task-specific and safe to overwrite.
+- Do not assume all shared storage has the same ownership behavior. Inspect or infer the target mount's permissions before adding ownership flags.
+- For shared stores that reject owner/group/permission preservation, such as known `nobody:nogroup` mounts, add `--no-owner --no-group --no-perms --omit-dir-times`; do not apply these flags blindly to normal user-owned storage.
 - Exclude `.git/`, caches, and irrelevant experiment outputs unless the task explicitly needs them.
 
 ### 4. Build or edit the Determined YAML
 
-- Add a bind mount for `/UNSAFE_SSD4/` to `/run/determined/workdir/UNSAFE_SSD4/`.
-- In `entrypoint`, `cd` into the synced project directory under `/run/determined/workdir/UNSAFE_SSD4/...` before launching the task.
+- Add a bind mount from the configured shared storage root to the configured container mount root.
+- In `entrypoint`, `cd` into the synced project directory under the configured container mount root before launching the task.
 - For CPU-only jobs, prefer `resources.slots_per_trial: 0`.
 - For GPU jobs, set `slots_per_trial`, `resource_pool`, image, and environment variables explicitly.
+- For experiments, explicitly override `checkpoint_storage` to a known shared filesystem path for the target cluster/pool. Do not rely on the Determined default checkpoint storage unless it has already been verified for that workload.
 - For long runs, sweeps, ablations, and batch jobs, prefer one YAML per task or per sweep shard so runs can queue independently.
-- Reuse existing examples from `/home/lzzhao/hmnd_ws/whole_body_tracking/determined_batch_submit/cfg/` whenever possible instead of inventing a YAML from scratch.
+- Reuse project-local templates or checked-in examples whenever possible instead of inventing a YAML from scratch. Do not cite machine-specific absolute template paths in the skill or final report.
 
 ### 5. Check pools and submit
 
 - Check pools before choosing execution location.
 - Prefer commands of the form:
-  - `determined-batch list-pools --available-only --min-free-slots <n> --secrets-file ~/.config/determined_batch/.secrets.env`
-  - `determined-batch submit --config /path/to/task.yaml --secrets-file ~/.config/determined_batch/.secrets.env`
+  - `determined-batch list-pools --available-only --min-free-slots <n> --secrets-file <secrets-file>`
+  - `determined-batch submit --config <task.yaml> --secrets-file <secrets-file>`
 - For interactive shell debugging, use the same secrets file and pool checks before starting the shell session.
 - For CPU-only jobs, still inspect pool availability and confirm the selected pool accepts `slots_per_trial: 0`.
 - Preserve the YAML path and synced code path so the run is reproducible.
@@ -93,20 +96,29 @@ description: Use when a task is GPU-intensive, CPU-intensive, long-running, memo
 
 - Local fallback is the exception, not the default.
 - Only use it when GPU is mandatory, the task is not multi-GPU, and the cluster lacks enough free GPU slots right now.
-- Launch through `zsh`, then activate the local environment with `mamba activate cu129_py311_gcc11`.
+- Launch through the user's preferred shell, then activate the project-approved local environment.
 - For long local jobs, redirect logs to a file and report the command, PID, log path, and stop method.
 
 ### 8. Report back
 
 - State whether execution is on the cluster or local.
-- For cluster runs, report:
+- For cluster experiment runs, report:
   - sync directory
   - YAML path
-  - mode: `shell` or `experiment`
+  - mode: `experiment`
   - resource pool
   - `slots_per_trial`
-  - experiment ID or shell/session identifier
+  - experiment ID
+  - `checkpoint_storage` override
   - log or status command
+- For cluster shell runs, report:
+  - shell config path
+  - mode: `shell`
+  - resource pool
+  - slots requested
+  - shell ID/session identifier
+  - reconnect command or helper command
+  - expected lifetime and kill command, if known
 - For local runs, report:
   - shell and environment
   - command
@@ -117,20 +129,20 @@ description: Use when a task is GPU-intensive, CPU-intensive, long-running, memo
 ## Quick Checklist
 
 - Determine whether the task is truly heavy enough to warrant cluster usage.
-- Prefer `determined_batch_submit` / `determined-batch`; install it first if missing.
+- Prefer the configured Determined submission helper / `determined-batch`; install or activate it first if missing.
 - Prefer Determined for both GPU-heavy and CPU-heavy work.
 - Prefer Determined shell for interactive debugging.
 - Prefer Determined experiments for long-running and batched work.
-- Sync code to `/UNSAFE_SSD4` before submission.
-- Use `/run/determined/workdir/UNSAFE_SSD4` inside Determined containers.
+- Sync code to the configured shared storage root before submission.
+- Use the configured container mount root inside Determined containers.
+- Use ownership-preserving `rsync` only when the target storage supports it; add `--no-owner --no-group --no-perms --omit-dir-times` only for mounts that need it.
+- Override experiment `checkpoint_storage` explicitly.
 - Try `slots_per_trial: 0` for CPU-only heavy jobs.
 - Fall back locally only for non-multi-GPU jobs that require GPU when cluster GPU resources are unavailable.
 - Keep multi-GPU jobs on the cluster even when that means waiting in queue.
-- Return experiment IDs or PIDs instead of blocking on long runs unless the user explicitly requests monitoring.
+- Return experiment IDs, shell IDs, or PIDs instead of blocking on long runs unless the user explicitly requests monitoring.
 
 ## References
 
 - Load `references/determined-batch-snippets.md` for reusable command templates, `rsync` snippets, and YAML fragments.
-- Prefer `/home/lzzhao/hmnd_ws/whole_body_tracking/determined_batch_submit/README.md` for installation, CLI usage, and auth flow.
-- Prefer `/home/lzzhao/hmnd_ws/whole_body_tracking/determined_batch_submit/cfg/rebuild_lafan1_rollouts_vae_batch_reboot_v2_mp8_96cpu.yaml` for `/UNSAFE_SSD4` mount patterns.
-- Prefer `/home/lzzhao/hmnd_ws/whole_body_tracking/determined_batch_submit/cfg/train_meanflow_reboot_v2_hdf5_vds_1gpu.yaml` for single-GPU submission patterns.
+- Prefer project-local Determined helper documentation for installation, CLI usage, authentication, mount patterns, and single-GPU submission patterns.
