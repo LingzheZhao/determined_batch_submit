@@ -11,6 +11,24 @@
 
 ## 常用命令
 
+### 0. 首次使用前先确认
+
+- 当前项目里谁提供以下必填信息：
+  - `DET_MASTER`
+  - `DETERMINED_BATCH_SECRETS` 或等价 `--secrets-file`
+  - 共享存储根目录
+  - 容器内对应挂载根目录
+  - experiment 的 `checkpoint_storage` 根目录
+- 按任务需要再确认：
+  - W&B 变量
+  - proxy 变量
+  - 默认镜像
+  - 默认 resource pool
+- 仅本地 fallback 时再确认：
+  - 使用哪个 shell
+  - 本地环境如何激活
+- 不要假设这些值都来自同一个地方；先确认它们分别来自用户 export、secrets 文件、helper script、模板，还是生成后的 YAML。
+
 ### 1. 设置 secrets 文件
 
 ```bash

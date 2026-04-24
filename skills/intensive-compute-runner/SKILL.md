@@ -30,6 +30,23 @@ description: Use when a task is GPU-intensive, CPU-intensive, long-running, memo
 
 ## Workflow
 
+### 0. First-time setup
+
+- Before first use in a new project, identify the project-approved values or providers for:
+  - `DET_MASTER`
+  - the Determined secrets file path
+  - the shared storage root used for synced code and artifacts
+  - the matching container mount root for that shared storage
+  - the experiment `checkpoint_storage` root
+- Also identify which values are optional or task-specific:
+  - W&B settings
+  - proxy settings
+  - container image
+  - default resource pool
+- For local fallback, identify the project-approved shell and environment activation command.
+- Do not assume these come from the same place. Confirm whether each one is provided by user exports, a secrets file, helper scripts, checked-in templates, or the generated YAML itself.
+- If any of the required values above are still unknown, stop and resolve them before submitting the first shell or experiment.
+
 ### 1. Decide cluster vs local
 
 - First determine whether the task is interactive debugging, a long-running job, a batch queue, or a local-sized quick check.
