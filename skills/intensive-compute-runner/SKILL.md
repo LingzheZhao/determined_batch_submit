@@ -99,6 +99,8 @@ description: Use when a task is GPU-intensive, CPU-intensive, long-running, memo
 - Preserve the YAML path and synced code path so the run is reproducible.
 - For interactive debugging, prefer a Determined shell workflow instead of forcing everything through experiment YAML.
 - For queued experiment batches, preserve the submission command template so additional YAMLs can be submitted in parallel or sequence.
+- After submitting an experiment, inspect recent tail logs instead of reading only the beginning of the log stream; startup issues and first real progress often appear near the end.
+- Prefer the project's tail/limit-style log query over rereading from the start; begin with the most recent 20-100 lines, then widen only if needed.
 
 ### 6. Interactive shell vs experiment
 
