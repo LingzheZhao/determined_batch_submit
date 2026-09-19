@@ -31,11 +31,11 @@ class ConflictError(_CodedComputeError):
 
 @dataclass(frozen=True)
 class TaskRecord:
-    """Secret-free task metadata persisted locally.
+    """Task identity and operator-facing display metadata persisted locally.
 
-    Request bodies, generated configs, API responses, logs, and exception messages
-    are deliberately absent so credentials embedded in any of them cannot leak into
-    the task database.
+    Names and descriptions are stored and must not contain credentials. Full
+    request bodies, generated configs, API responses, logs, and exception
+    messages are not stored in this record.
     """
 
     task_id: str
@@ -48,6 +48,8 @@ class TaskRecord:
     remote_id: Optional[str]
     remote_state: Optional[str]
     code_revision: Optional[str]
+    name: Optional[str]
+    description: Optional[str]
     workdir: str
     output_dir: str
     cluster_identity: Optional[str]

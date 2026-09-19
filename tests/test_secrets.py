@@ -21,3 +21,12 @@ def test_explicit_credential_file_overrides_environment(tmp_path, monkeypatch):
     path.write_text('DET_USERNAME=example-user\n')
     monkeypatch.setenv('DETERMINED_COMPUTE_SECRETS', str(tmp_path / 'missing.env'))
     assert load_secrets(path) == {'DET_USERNAME': 'example-user'}
+
+
+def test_quoted_ssh_credentials_are_literal_not_shell_code(tmp_path):
+    path = tmp_path / 'credentials.env'
+    path.write_text("export SSH_USERNAME='example-user'\nSSH_PASSWORD=\"$literal=$(never-run)#value\"\n")
+    assert load_secrets(path) == {
+        'SSH_USERNAME': 'example-user',
+        'SSH_PASSWORD': '$literal=$(never-run)#value',
+    }

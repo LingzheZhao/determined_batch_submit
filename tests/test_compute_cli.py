@@ -163,11 +163,11 @@ def test_lazy_client_factory_failure_is_not_cached():
 
     lazy = compute_cli._LazyClient(factory)
     with pytest.raises(RuntimeError, match="temporary login failure"):
-        lazy._get()
+        lazy._resolve_client()
 
-    recovered = lazy._get()
+    recovered = lazy._resolve_client()
     assert recovered.cluster_identity == "recovered"
-    assert lazy._get() is recovered
+    assert lazy._resolve_client() is recovered
     assert attempts == 2
 
 
@@ -217,3 +217,13 @@ def test_real_plan_needs_no_owner_database_or_api_client(tmp_path, monkeypatch, 
 
     assert code == 0
     assert json.loads(capsys.readouterr().out)["result"]["kind"] == "command"
+
+
+def test_lazy_client_delegates_api_get_instead_of_shadowing_it():
+    class API:
+        def _get(self, endpoint, params=None):
+            return {'endpoint': endpoint, 'params': params}
+    lazy = compute_cli._LazyClient(API)
+    assert lazy._get('api/v1/resource-pools', params={'limit': 0}) == {
+        'endpoint': 'api/v1/resource-pools', 'params': {'limit': 0},
+    }

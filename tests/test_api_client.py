@@ -115,7 +115,11 @@ def test_get_task_preserves_safe_config_for_identity_check(monkeypatch):
             "config": {
                 "description": "marker\nhuman text",
                 "entrypoint": ["true"],
-                "environment_variables": ["PASSWORD=do-not-persist"],
+                "environment_variables": [
+                    "PASSWORD=do-not-persist",
+                    "COMPUTE_SUBMISSION_MARKER="
+                    "determined-compute:11111111-1111-1111-1111-111111111111",
+                ],
                 "api_token": "do-not-persist",
             },
         }),
@@ -125,6 +129,122 @@ def test_get_task_preserves_safe_config_for_identity_check(monkeypatch):
     assert task["config"]["entrypoint"] == ["true"]
     assert task["config"]["environment_variables"] == "[redacted]"
     assert "api_token" not in task["config"]
+    assert task["submissionMarker"] == (
+        "determined-compute:11111111-1111-1111-1111-111111111111"
+    )
+
+
+@pytest.mark.parametrize(
+    "environment_variables",
+    [
+        [
+            "SAFE=value",
+            "COMPUTE_SUBMISSION_MARKER=determined-compute:22222222-2222-2222-2222-222222222222",
+        ],
+        {
+            "cpu": [
+                "COMPUTE_SUBMISSION_MARKER=determined-compute:22222222-2222-2222-2222-222222222222"
+            ],
+            "cuda": ["SAFE=value"],
+        },
+        {
+            "cpu": {
+                "COMPUTE_SUBMISSION_MARKER": (
+                    "determined-compute:22222222-2222-2222-2222-222222222222"
+                )
+            }
+        },
+    ],
+)
+def test_get_task_extracts_only_safe_marker_before_environment_redaction(
+    monkeypatch, environment_variables
+):
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: Response(
+            {
+                "command": {"id": "c1"},
+                "config": {
+                    "description": "human task description",
+                    "environment": {
+                        "environment_variables": environment_variables,
+                    },
+                },
+            }
+        ),
+    )
+
+    task = client().get_task("command", "c1")
+
+    assert task["submissionMarker"] == (
+        "determined-compute:22222222-2222-2222-2222-222222222222"
+    )
+    assert task["config"]["description"] == "human task description"
+    assert task["config"]["environment"]["environment_variables"] == "[redacted]"
+
+
+def test_get_task_rejects_malformed_marker_metadata(monkeypatch):
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: Response(
+            {
+                "command": {
+                    "id": "c1",
+                    "submissionMarker": (
+                        "determined-compute:33333333-3333-3333-3333-333333333333"
+                    ),
+                    "environmentVariables": ["TOKEN=raw-entity-secret"],
+                },
+                "config": {
+                    "environment": {
+                        "environment_variables": [
+                            "COMPUTE_SUBMISSION_MARKER=not-a-safe-marker",
+                            "TOKEN=secret",
+                        ]
+                    }
+                },
+            }
+        ),
+    )
+
+    task = client().get_task("command", "c1")
+
+    assert "submissionMarker" not in task
+    assert task["environmentVariables"] == "[redacted]"
+    assert task["config"]["environment"]["environment_variables"] == "[redacted]"
+
+
+def test_get_task_extracts_marker_from_yaml_experiment_config(monkeypatch):
+    import yaml
+
+    config = yaml.safe_dump(
+        {
+            "name": "human experiment",
+            "environment": {
+                "environment_variables": {
+                    "cuda": [
+                        "COMPUTE_SUBMISSION_MARKER="
+                        "determined-compute:44444444-4444-4444-4444-444444444444"
+                    ]
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: Response({"experiment": {"id": "e1"}, "config": config}),
+    )
+
+    task = client().get_task("experiment", "e1")
+
+    assert task["submissionMarker"] == (
+        "determined-compute:44444444-4444-4444-4444-444444444444"
+    )
+    assert task["config"]["name"] == "human experiment"
+    assert task["config"]["environment"]["environment_variables"] == "[redacted]"
 
 
 def test_redaction_covers_secret_aliases_without_masking_innocent_tokens():
@@ -193,7 +313,10 @@ def test_get_experiment_unwrap_and_true_tail(monkeypatch):
 
     monkeypatch.setattr(requests, "get", get)
     assert client().get_task("experiment", "9")["id"] == 9
-    assert [item["message"] for item in client().task_logs("experiment", "9", tail=2)] == ["old", "new"]
+    messages = [
+        item["message"] for item in client().task_logs("experiment", "9", tail=2)
+    ]
+    assert messages == ["old", "new"]
     assert requested[-1] == (
         "/api/v1/trials/17/logs",
         {"limit": 2, "follow": False, "orderBy": "ORDER_BY_DESC"},

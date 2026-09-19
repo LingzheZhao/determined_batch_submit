@@ -5,7 +5,7 @@ description: Plan, launch, inspect, and stop resource-intensive GPU or CPU work 
 
 # Intensive Compute Runner
 
-Use this repository's `ComputeService` as the control plane for heavy compute. The service owns planning, launch idempotency, task records, status, logs, and cancellation. Keep this skill in the repository; it is loaded by the dedicated worker rather than installed globally. A dedicated compute worker receives this repository copy of the skill with each consult request.
+Use this repository's `ComputeService` for heavy-compute planning, idempotent launch, task state, logs, and cancellation. The dedicated consultation worker loads this repository skill; do not install it globally.
 
 ## Choose a mode
 
@@ -17,20 +17,27 @@ Let `kind: auto` select from intent when the request is clear:
 
 Set `interactive` or `overnight` explicitly when intent would otherwise be ambiguous. Use the minimum suitable `slots`; heavy CPU work can use zero GPU slots only if the service and target pool support it.
 
+Give each request a short, task-specific `name` and a `description` that states its purpose or config. Do not use task IDs, request IDs, or UUIDs as display names.
+
 ## Prepare durable inputs
 
 Put code, configs, datasets, packages, outputs, checkpoints, and other artifacts on storage covered by the compute profile's `mounts`. Use the mapped container path for `workdir` and `output_dir`. Never send source through an experiment `modelDefinition`, project archive, or other upload field.
 
-For durable jobs, run a stable code revision from its own shared-storage directory and record `code_revision`. A mutable shared workspace is suitable for shell debugging, but it is a poor provenance boundary for an unattended run.
+For durable jobs, use a stable revision in its own shared directory and record `code_revision`. Reserve mutable workspaces for shell debugging.
 
 If files must be copied into shared storage, read [references/compute-workflow.md](references/compute-workflow.md). Preserve its secret exclusions and safe sync rules.
 
+If the client lacks cluster mounts, read [the shared-storage access guide](../../docs/shared-storage-access.md). Use `storage_check`, preview `storage_sync` or `storage_fetch`, and execute only after review. Storage credentials stay service-side; the consultation worker cannot test them.
+
 ## Plan, then execute
 
-1. Call `compute_plan` with the proposed request. Inspect the resolved kind, rendered config, mapped paths, revision, and advisories.
-2. Resolve unsafe or ambiguous plan output before launch. Never include credentials in requests, configs, logs, or reports.
-3. Call `compute_launch` with a stable `request_id`. Keep the returned local `task_id`; it is distinct from the remote Determined ID.
-4. Use `compute_status`, `compute_logs`, and `compute_list_tasks` for observation. Use `compute_cancel` only for the intended task.
+1. Call `compute_plan`; inspect the resolved kind, config, paths, revision, and advisories.
+2. Call `compute_resources` for the requested slots and pool. Capacity is a snapshot, not a reservation; do not switch pool or location automatically.
+3. Keep `allow_queue: false` unless queueing is approved for this call. Resolve unsafe or unknown capacity before launch.
+4. Call `compute_launch` with a stable `request_id`. Keep its local `task_id`, which differs from the remote ID.
+5. Observe with `compute_status`, `compute_logs`, and `compute_list_tasks`; cancel only the intended task.
+
+Never include credentials in requests, configs, logs, or reports. A launch with `allow_queue: false` performs admission checking and rejects busy or unknown capacity without submitting; `true` explicitly permits scheduler queueing.
 
 If launch outcome is unknown after a timeout or connection loss, do not submit again blindly. Use `compute_reconcile` only with a verified remote ID for the known task; the service checks its submission marker before binding. If authentication fails, stop and report the configuration problem; do not fall back to local execution.
 
@@ -38,6 +45,6 @@ If launch outcome is unknown after a timeout or connection loss, do not submit a
 
 ## Report
 
-Return the selected mode, local task ID, remote ID when known, state, pool, slot count, mapped work/output paths, code revision, and the next status/log/cancel action. Omit secrets and secret-file contents.
+Return the name, mode, IDs, state, pool, slots, mapped paths, revision, and next status/log/cancel action. Omit secrets.
 
 Read [references/compute-workflow.md](references/compute-workflow.md) for request fields, storage preparation, failure handling, and deployment-specific shell policy.

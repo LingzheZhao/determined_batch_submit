@@ -13,6 +13,7 @@ mounts:
     container_path: "/SSD_home"
   - host_path: "/SSD_datasets"
     container_path: "/SSD_datasets"
+    # read_only: true  # Enable for reference datasets.
   - host_path: "/SSD3"
     container_path: "/SSD3"
   - host_path: "/SSD3_home"

@@ -3,4 +3,4 @@
 from determined_compute.core.api_client import APIError, DeterminedAPIClient, SubmissionUncertainError
 
 __all__ = ["DeterminedAPIClient", "APIError", "SubmissionUncertainError"]
-__version__ = "0.4.0"
+__version__ = "0.5.0"

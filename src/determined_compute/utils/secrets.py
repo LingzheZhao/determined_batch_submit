@@ -27,6 +27,10 @@ def load_secrets(secrets_path: Optional[Path] = None) -> Dict[str, str]:
 
     Missing files are ignored so callers can rely on environment variables
     without having to create a secrets file.
+
+    An optional ``export`` prefix and matching outer quotes are accepted.
+    Values are literal: shell expansion, escapes, and command substitution
+    are never evaluated.
     """
     path = Path(secrets_path) if secrets_path else default_secrets_path()
     secrets: Dict[str, str] = {}
@@ -37,10 +41,15 @@ def load_secrets(secrets_path: Optional[Path] = None) -> Dict[str, str]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export "):].lstrip()
         if "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        secrets[key.strip()] = value.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        secrets[key.strip()] = value
     return secrets
 
 

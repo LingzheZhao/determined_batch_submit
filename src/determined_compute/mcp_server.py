@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from determined_compute.compute import ComputeError, ComputeProfile, ComputeService, SQLiteTaskStore
-from determined_compute.compute_cli import DEFAULT_DB_PATH, _LazyClient, normalize_owner
+from determined_compute.compute_cli import DEFAULT_DB_PATH, _LazyClient, normalize_owner, safe_error_details
 from determined_compute.core.api_client import APIError as ClientAPIError
 from determined_compute.core.api_client import DeterminedAPIClient
 
@@ -28,11 +28,9 @@ def _tool_error(exc: BaseException) -> dict[str, Any]:
     retryable = getattr(exc, "retryable", None)
     if retryable is not None:
         error["retryable"] = bool(retryable)
-    details = getattr(exc, "details", None)
-    if isinstance(details, dict) and details.get("task_id"):
-        error["details"] = {"task_id": str(details["task_id"])}
-    elif getattr(exc, "task_id", None):
-        error["details"] = {"task_id": str(exc.task_id)}
+    details = safe_error_details(exc)
+    if details:
+        error["details"] = details
     return {"error": error}
 
 
@@ -40,6 +38,8 @@ def create_server(
     service: ComputeService,
     owner: str,
     workflow_manager: Any = None,
+    storage_service: Any = None,
+    resource_inspector: Any = None,
 ) -> Any:
     """Create an MCP server bound to one local owner namespace."""
 
@@ -53,7 +53,16 @@ def create_server(
             "MCP support is not installed; install determined-compute[mcp]"
         ) from exc
 
-    server = MCPServer("determined-compute")
+    server = MCPServer(
+        "determined-compute",
+        instructions=(
+            "Choose a meaningful request.name and request.description for each launch. "
+            "Check capacity with compute_resources; queuing requires explicit allow_queue=true. "
+            "Keep code and data on shared mounts; use storage_check/sync/fetch for file access. "
+            "Plan before launch, keep request_id stable, and use the returned task_id for control. "
+            "Credentials belong in local configuration, never in tool arguments."
+        ),
+    )
 
     def fail(exc: BaseException) -> None:
         raise ToolError(json.dumps(_tool_error(exc), sort_keys=True, separators=(",", ":")))
@@ -70,7 +79,10 @@ def create_server(
         read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False,
     ))
     async def compute_plan(request: dict[str, Any]) -> dict[str, Any]:
-        """Validate and render a compute request without contacting the cluster."""
+        """Render a request offline. Include name, description, command, workdir and output_dir.
+
+        Optional kind, slots, pool, image and allow_queue control execution; paths use container mounts.
+        """
 
         return await call(service.plan, request)
 
@@ -78,7 +90,7 @@ def create_server(
         read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True,
     ))
     async def compute_launch(request: dict[str, Any], request_id: str) -> dict[str, Any]:
-        """Launch a compute request idempotently in the server's owner namespace."""
+        """Launch a named request idempotently, checking capacity unless allow_queue=true."""
 
         return await call(service.launch, request, request_id, owner)
 
@@ -123,6 +135,38 @@ def create_server(
         """List tasks in the server's owner namespace."""
 
         return await call(service.list_tasks, owner)
+
+    if resource_inspector is not None:
+
+        @server.tool(annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True,
+        ))
+        async def compute_resources(slots: int = 1, pool: Optional[str] = None) -> dict[str, Any]:
+            """Inspect current scheduler capacity; slots=0 checks auxiliary capacity, not free GPUs."""
+            return await call(resource_inspector.resources, slots, pool)
+
+    if storage_service is not None:
+
+        @server.tool(annotations=ToolAnnotations(
+            read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True,
+        ))
+        async def storage_check(path: str) -> dict[str, Any]:
+            """Check a shared container path through a local mount or configured SSH login node."""
+            return await call(storage_service.check, path)
+
+        @server.tool(annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True,
+        ))
+        async def storage_sync(local_dir: str, shared_dir: str, dry_run: bool = True) -> dict[str, Any]:
+            """Copy local directory contents to a mapped shared directory; preview by default, no deletions."""
+            return await call(storage_service.sync, local_dir, shared_dir, dry_run)
+
+        @server.tool(annotations=ToolAnnotations(
+            read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True,
+        ))
+        async def storage_fetch(shared_dir: str, local_dir: str, dry_run: bool = True) -> dict[str, Any]:
+            """Copy shared directory contents to a local directory; preview by default, no deletions."""
+            return await call(storage_service.fetch, shared_dir, local_dir, dry_run)
 
     if workflow_manager is not None:
 
@@ -171,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the trusted local Determined compute MCP server over stdio",
     )
     parser.add_argument("--profile", help="Compute profile YAML (or DETERMINED_COMPUTE_PROFILE)")
+    parser.add_argument("--storage-config", help="Client storage access YAML (or DETERMINED_COMPUTE_STORAGE)")
     parser.add_argument("--db", help="Shared SQLite database (or DETERMINED_COMPUTE_DB)")
     parser.add_argument(
         "--owner",
@@ -218,13 +263,19 @@ def _runtime(args: argparse.Namespace) -> tuple[Any, str]:
 
     service = ComputeService(_LazyClient(make_client), store, profile)
 
+    from determined_compute.storage import StorageAccessConfig, StorageService
+    access_path = args.storage_config or os.environ.get("DETERMINED_COMPUTE_STORAGE")
+    access = StorageAccessConfig.from_file(access_path) if access_path else StorageAccessConfig()
+    storage = StorageService(profile, access, Path(args.secrets_file).expanduser() if args.secrets_file else None)
+
     try:
         from determined_compute.agent_worker import WorkflowManager
     except ImportError:
         workflow_manager = None
     else:
         workflow_manager = WorkflowManager(db_path, repo_root)
-    return create_server(service, owner, workflow_manager), owner
+    from determined_compute.compute.admission import ResourceInspector
+    return create_server(service, owner, workflow_manager, storage, ResourceInspector(service.client)), owner
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

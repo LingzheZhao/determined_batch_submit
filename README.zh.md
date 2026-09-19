@@ -24,7 +24,7 @@ cp cfg/compute-profile.example.yaml .local/profile.yaml
 cp cfg/examples/command_request.json .local/request.json
 ```
 
-在 `profile.yaml` 中设置共享存储的宿主机路径、容器路径、镜像和资源池。在 `request.json` 中设置命令，并将 `workdir`、`output_dir` 改为映射内的**容器路径**。启动前，将运行所需的文件放到共享存储中。
+在 `profile.yaml` 中设置共享存储的宿主机路径、容器路径、镜像和资源池。在 `request.json` 中设置命令，并将 `workdir`、`output_dir` 改为映射内的**容器路径**。启动前，将运行所需的文件放到共享存储中。本机没有挂载时，参见[共享存储接入](docs/shared-storage-access.zh.md)。
 
 创建 `.local/credentials.env`：
 
@@ -52,11 +52,11 @@ codex mcp add determined-compute -- \
 
 其他 MCP 客户端可通过 stdio 启动同一程序，并传入相同参数。请使用绝对路径。使用相同数据库和 owner 的会话共享任务记录；owner 是命名空间，不是认证机制。
 
-1. 将 `request.json` 的内容传给 `compute_plan(request)`。
+1. 为请求填写清晰的 `name` 和 `description`，再将 `request.json` 的内容传给 `compute_plan(request)`。
 2. 调用 `compute_launch(request, request_id)`，保存返回的 `task_id`。
 3. 使用 `compute_status(task_id)` 和 `compute_logs(task_id)` 跟进进度；调用 `compute_cancel(task_id)` 停止任务。
 
-重试同一次提交时复用原 `request_id`。如果无法确定是否提交成功，先检查已有任务，再决定后续操作。
+提交前默认检查可用容量并避免排队；确实需要排队时显式设置 `allow_queue: true`。重试同一次提交时复用原 `request_id`。如果无法确定是否提交成功，先检查已有任务，再决定后续操作。
 
 可选：调用 `compute_consult(question, request_id)` 启动只读的 `gpt-5.6-sol` 咨询，再用 `workflow_status(workflow_id)` 获取结果。此功能需要已安装并登录的 Codex CLI；worker 会自动读取仓库内的 skill。
 

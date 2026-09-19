@@ -39,7 +39,7 @@ class _LazyClient:
         self._client: Optional[DeterminedAPIClient] = None
         self._lock = threading.Lock()
 
-    def _get(self) -> DeterminedAPIClient:
+    def _resolve_client(self) -> DeterminedAPIClient:
         if self._client is None:
             with self._lock:
                 if self._client is None:
@@ -48,11 +48,20 @@ class _LazyClient:
         return self._client
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._get(), name)
+        return getattr(self._resolve_client(), name)
 
 
 def _json_dump(value: Any) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def safe_error_details(exc: BaseException) -> dict[str, Any]:
+    details = getattr(exc, "details", None)
+    allowed = {"task_id", "resource_pool", "requested_slots", "available", "candidate_pools"}
+    result = {key: value for key, value in details.items() if key in allowed} if isinstance(details, dict) else {}
+    if "task_id" not in result and getattr(exc, "task_id", None):
+        result["task_id"] = str(exc.task_id)
+    return result
 
 
 def _error_payload(exc: BaseException) -> dict[str, Any]:
@@ -63,11 +72,9 @@ def _error_payload(exc: BaseException) -> dict[str, Any]:
     retryable = getattr(exc, "retryable", None)
     if retryable is not None:
         error["retryable"] = bool(retryable)
-    details = getattr(exc, "details", None)
-    if isinstance(details, dict) and details.get("task_id"):
-        error["details"] = {"task_id": str(details["task_id"])}
-    elif getattr(exc, "task_id", None):
-        error["details"] = {"task_id": str(exc.task_id)}
+    details = safe_error_details(exc)
+    if details:
+        error["details"] = details
     return {"ok": False, "error": error}
 
 
@@ -125,6 +132,27 @@ def _resolve_runtime(args: argparse.Namespace) -> tuple[ComputeService, str]:
     return ComputeService(client, store, profile), owner
 
 
+def _resolve_storage(args: argparse.Namespace) -> Any:
+    from determined_compute.storage import StorageAccessConfig, StorageService
+
+    profile_path = args.profile or os.environ.get("DETERMINED_COMPUTE_PROFILE")
+    if not profile_path:
+        raise ValueError("--profile or DETERMINED_COMPUTE_PROFILE is required")
+    access_path = args.storage_config or os.environ.get("DETERMINED_COMPUTE_STORAGE")
+    access = StorageAccessConfig.from_file(access_path) if access_path else StorageAccessConfig()
+    secrets_path = Path(args.secrets_file).expanduser() if args.secrets_file else None
+    return StorageService(ComputeProfile.from_file(profile_path), access, secrets_path)
+
+
+def _dispatch_storage(args: argparse.Namespace) -> Any:
+    service = _resolve_storage(args)
+    if args.command == "storage-check":
+        return service.check(args.path)
+    if args.command == "storage-sync":
+        return service.sync(args.local_dir, args.shared_dir, dry_run=not args.execute)
+    return service.fetch(args.shared_dir, args.local_dir, dry_run=not args.execute)
+
+
 def _add_request_args(parser: argparse.ArgumentParser) -> None:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--request", help="Compute request as a JSON or YAML object")
@@ -141,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Plan and manage persistent Determined compute tasks",
     )
     parser.add_argument("--profile", help="Compute profile YAML (or DETERMINED_COMPUTE_PROFILE)")
+    parser.add_argument("--storage-config", help="Client storage access YAML (or DETERMINED_COMPUTE_STORAGE)")
     parser.add_argument("--db", help="Shared SQLite task database (or DETERMINED_COMPUTE_DB)")
     parser.add_argument(
         "--owner",
@@ -179,6 +208,20 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("remote_id")
 
     commands.add_parser("list", help="List tasks in the bound owner namespace")
+    resources = commands.add_parser("resources", help="Inspect current cluster scheduling capacity")
+    resources.add_argument("--slots", type=int, default=1, help="Required slots; zero checks auxiliary capacity")
+    resources.add_argument("--pool", help="Inspect one resource pool")
+
+    check = commands.add_parser("storage-check", help="Check a mapped shared path locally or through SSH")
+    check.add_argument("path", help="Shared path in the container namespace")
+    sync = commands.add_parser("storage-sync", help="Preview copying local directory contents to shared storage")
+    sync.add_argument("local_dir")
+    sync.add_argument("shared_dir", help="Destination directory in the container namespace")
+    sync.add_argument("--execute", action="store_true", help="Perform the transfer instead of previewing")
+    fetch = commands.add_parser("storage-fetch", help="Preview copying shared directory contents to local storage")
+    fetch.add_argument("shared_dir", help="Source directory in the container namespace")
+    fetch.add_argument("local_dir")
+    fetch.add_argument("--execute", action="store_true", help="Perform the transfer instead of previewing")
     return parser
 
 
@@ -206,6 +249,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "resources":
+            from determined_compute.compute.admission import ResourceInspector
+            _json_dump(_success_payload(ResourceInspector(_client_factory(args)).resources(args.slots, args.pool)))
+            return 0
+        if args.command in {"storage-check", "storage-sync", "storage-fetch"}:
+            _json_dump(_success_payload(_dispatch_storage(args)))
+            return 0
         service, owner = _resolve_runtime(args)
         _json_dump(_success_payload(_dispatch(args, service, owner)))
         return 0

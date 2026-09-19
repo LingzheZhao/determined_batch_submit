@@ -24,7 +24,7 @@ cp cfg/compute-profile.example.yaml .local/profile.yaml
 cp cfg/examples/command_request.json .local/request.json
 ```
 
-Edit `profile.yaml` with your shared host/container paths, image and resource pool. Edit `request.json` with your command and mapped **container paths** for `workdir` and `output_dir`. Place the workload on shared storage before launching.
+Edit `profile.yaml` with your shared host/container paths, image and resource pool. Edit `request.json` with your command and mapped **container paths** for `workdir` and `output_dir`. Place the workload on shared storage before launching. For login-node access without a local mount, see [shared storage access](docs/shared-storage-access.md).
 
 Create `.local/credentials.env`:
 
@@ -52,11 +52,11 @@ codex mcp add determined-compute -- \
 
 Other MCP clients can launch the same executable and arguments using stdio. Use absolute paths. Sessions with the same database and owner share task records; owner names are namespaces, not authentication.
 
-1. Call `compute_plan(request)` with the contents of `request.json`.
+1. Give the request a meaningful `name` and `description`, then call `compute_plan(request)` with the contents of `request.json`.
 2. Call `compute_launch(request, request_id)` and keep the returned `task_id`.
 3. Use `compute_status(task_id)` and `compute_logs(task_id)` to follow progress; `compute_cancel(task_id)` stops the task.
 
-Reuse the same `request_id` when retrying the same launch. If acceptance is uncertain, inspect the existing task before starting another.
+Launches check current capacity and avoid queuing by default; set `allow_queue: true` only when queuing is intended. Reuse the same `request_id` when retrying the same launch. If acceptance is uncertain, inspect the existing task before starting another.
 
 Optional: `compute_consult(question, request_id)` starts a read-only `gpt-5.6-sol` consultation; retrieve its result with `workflow_status(workflow_id)`. This requires an installed, signed-in Codex CLI. The worker reads the repository skill automatically.
 

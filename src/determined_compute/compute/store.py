@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS compute_tasks (
     remote_id TEXT,
     remote_state TEXT,
     code_revision TEXT,
+    name TEXT,
+    description TEXT,
     workdir TEXT NOT NULL,
     output_dir TEXT NOT NULL,
     cluster_identity TEXT,
@@ -53,6 +55,28 @@ class SQLiteTaskStore:
             if self.path != ":memory:":
                 self._connection.execute("PRAGMA journal_mode = WAL")
             self._connection.executescript(_SCHEMA)
+            self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Add metadata columns without rewriting existing task rows."""
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            columns = {
+                str(row["name"])
+                for row in self._connection.execute("PRAGMA table_info(compute_tasks)")
+            }
+            if "name" not in columns:
+                self._connection.execute("ALTER TABLE compute_tasks ADD COLUMN name TEXT")
+            if "description" not in columns:
+                self._connection.execute(
+                    "ALTER TABLE compute_tasks ADD COLUMN description TEXT"
+                )
+            self._connection.execute("COMMIT")
+        except Exception:
+            if self._connection.in_transaction:
+                self._connection.execute("ROLLBACK")
+            raise
 
     def close(self) -> None:
         with self._lock:
@@ -74,6 +98,8 @@ class SQLiteTaskStore:
         workdir: str,
         output_dir: str,
         cluster_identity: Optional[str],
+        name: Optional[str] = None,
+        description: Optional[str] = None,
     ) -> Tuple[TaskRecord, bool]:
         """Create a pending record, or return the prior identical request atomically."""
 
@@ -101,9 +127,9 @@ class SQLiteTaskStore:
                     """
                     INSERT INTO compute_tasks (
                         task_id, request_id, owner, payload_hash, profile_hash, kind,
-                        state, code_revision, workdir, output_dir, cluster_identity,
-                        submission_marker
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                        state, code_revision, name, description, workdir, output_dir,
+                        cluster_identity, submission_marker
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -113,6 +139,8 @@ class SQLiteTaskStore:
                         profile_hash,
                         kind,
                         code_revision,
+                        name,
+                        description,
                         workdir,
                         output_dir,
                         cluster_identity,
@@ -129,6 +157,14 @@ class SQLiteTaskStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+
+    def lookup_request(self, request_id: str, owner: str) -> Optional[TaskRecord]:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM compute_tasks WHERE owner = ? AND request_id = ?",
+                (owner, request_id),
+            ).fetchone()
+        return self._record(row) if row is not None else None
 
     def get_owned(self, task_id: str, owner: str) -> TaskRecord:
         with self._lock:

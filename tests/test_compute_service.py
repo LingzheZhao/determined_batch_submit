@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from determined_compute.compute import (
+    APIError,
     ComputeProfile,
     ComputeService,
     ConflictError,
@@ -56,6 +58,41 @@ class FakeClient:
         self.cancel_calls.append((kind, remote_id))
         return {"id": remote_id, "state": "TERMINATING", "exitCode": None}
 
+    def _get(self, endpoint, params=None):
+        if endpoint == "api/v1/resource-pools":
+            return {
+                "resourcePools": [
+                    {
+                        "name": "gpu",
+                        "numAgents": 1,
+                        "slotsAvailable": 1,
+                        "slotsUsed": 0,
+                        "slotType": "CUDA",
+                        "auxContainerCapacity": 4,
+                        "auxContainersRunning": 0,
+                    }
+                ]
+            }
+        if endpoint == "api/v1/agents":
+            return {
+                "agents": [
+                    {
+                        "id": "agent-1",
+                        "enabled": True,
+                        "draining": False,
+                        "resourcePools": ["gpu"],
+                        "slots": {
+                            "0": {
+                                "id": "0",
+                                "enabled": True,
+                                "draining": False,
+                            }
+                        },
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
 
 class UncertainClient(FakeClient):
     def launch_task(self, kind, config):
@@ -67,6 +104,22 @@ class EmptyCancelClient(FakeClient):
     def cancel_task(self, kind, remote_id):
         self.cancel_calls.append((kind, remote_id))
         return {}
+
+
+class ToggleInspector:
+    def __init__(self, available=True):
+        self.available = available
+        self.calls = []
+
+    def require_capacity(self, kind, config):
+        self.calls.append((kind, config))
+        if not self.available:
+            raise APIError(
+                "pool cannot fit request",
+                code="capacity_unavailable",
+                retryable=True,
+            )
+        return {"admitted": True}
 
 
 @pytest.fixture
@@ -103,6 +156,10 @@ def test_plan_is_offline_and_builds_shared_storage_command(tmp_path, profile, co
     assert client.launches == []
     assert client.gets == []
     assert plan["kind"] == "command"
+    assert plan["name"] == "command: code"
+    assert plan["description"] is None
+    assert plan["allow_queue"] is False
+    assert "generated_task_name" in {item["code"] for item in plan["advisories"]}
     assert plan["code_revision"] == "git:abc123-dirty=false"
     assert plan["config"]["resources"] == {"slots": 1, "resource_pool": "gpu"}
     assert plan["config"]["bind_mounts"] == [
@@ -128,6 +185,7 @@ def test_auto_modes_and_shell_advisory(tmp_path, profile, command_request):
     assert "entrypoint" not in plan["config"]
     assert plan["config"]["resources"]["slots"] == 1
     assert {item["code"] for item in plan["advisories"]} == {
+        "generated_task_name",
         "overnight_experiment_recommended",
         "shell_inactivity_policy",
     }
@@ -202,6 +260,115 @@ def test_context_named_hyperparameters_are_allowed(tmp_path, profile):
     assert plan["config"]["hyperparameters"]["context_length"] == 8192
 
 
+def test_read_only_mount_is_preserved_for_reference_data(tmp_path):
+    profile = ComputeProfile.from_dict(
+        {
+            "mounts": [
+                {"host_path": "/shared/work", "container_path": "/work"},
+                {
+                    "host_path": "/shared/graphics",
+                    "container_path": "/graphics",
+                    "read_only": True,
+                },
+            ],
+            "defaults": {"image": "image", "pool": "pool", "slots": 0},
+        }
+    )
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+
+    plan = service.plan(
+        {
+            "command": ["python", "repair.py", "--registry", "/graphics/registry"],
+            "workdir": "/work/code",
+            "output_dir": "/work/output",
+        }
+    )
+
+    assert {
+        "host_path": "/shared/graphics",
+        "container_path": "/graphics",
+        "read_only": True,
+    } in plan["config"]["bind_mounts"]
+
+
+@pytest.mark.parametrize("field", ["workdir", "output_dir"])
+def test_execution_paths_cannot_use_read_only_mount(tmp_path, field):
+    profile = ComputeProfile.from_dict(
+        {
+            "mounts": [
+                {"host_path": "/shared/work", "container_path": "/work"},
+                {
+                    "host_path": "/shared/reference",
+                    "container_path": "/reference",
+                    "read_only": True,
+                },
+            ],
+            "defaults": {"image": "image", "pool": "pool", "slots": 0},
+        }
+    )
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    request = {
+        "command": ["true"],
+        "workdir": "/work/code",
+        "output_dir": "/work/output",
+    }
+    request[field] = "/reference/task"
+
+    with pytest.raises(ValidationError, match="read-only"):
+        service.plan(request)
+
+
+def test_read_only_mount_validation_and_fingerprint():
+    base = {
+        "mounts": [{"host_path": "/shared", "container_path": "/shared"}],
+        "defaults": {"image": "image", "pool": "pool", "slots": 0},
+    }
+    writable = ComputeProfile.from_dict(base)
+    read_only = ComputeProfile.from_dict(
+        {
+            **base,
+            "mounts": [
+                {
+                    "host_path": "/shared",
+                    "container_path": "/shared",
+                    "read_only": True,
+                }
+            ],
+        }
+    )
+
+    assert writable.mounts[0].as_config() == {
+        "host_path": "/shared",
+        "container_path": "/shared",
+    }
+    assert read_only.mounts[0].as_config()["read_only"] is True
+    assert writable.fingerprint != read_only.fingerprint
+
+    invalid = {**base, "mounts": [{**base["mounts"][0], "read_only": "true"}]}
+    with pytest.raises(ValidationError, match="must be a boolean"):
+        ComputeProfile.from_dict(invalid)
+
+
+def test_submission_marker_environment_name_is_reserved(tmp_path, profile):
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    request = {
+        "kind": "experiment",
+        "workdir": "/shared/container/code",
+        "output_dir": "/shared/container/out",
+        "experiment_config": {
+            "entrypoint": "python train.py",
+            "environment": {
+                "environment_variables": [
+                    "COMPUTE_SUBMISSION_MARKER=user-controlled"
+                ]
+            },
+        },
+    }
+
+    with pytest.raises(ValidationError, match="cannot be overridden"):
+        service.plan(request)
+
+
 def test_concurrent_duplicate_launch_calls_remote_once(tmp_path, profile, command_request):
     client = FakeClient(delay=0.15)
     db_path = tmp_path / "tasks.db"
@@ -232,6 +399,204 @@ def test_request_id_payload_conflict(tmp_path, profile, command_request):
         service.launch(dict(command_request, command="echo changed"), "request-1", "session-a")
 
     assert caught.value.code == "idempotency_conflict"
+
+
+def test_capacity_failure_creates_no_record_and_same_request_can_retry(
+    tmp_path, profile, command_request
+):
+    inspector = ToggleInspector(available=False)
+    client = FakeClient()
+    service = ComputeService(
+        client,
+        SQLiteTaskStore(tmp_path / "tasks.db"),
+        profile,
+        inspector=inspector,
+    )
+
+    with pytest.raises(APIError) as caught:
+        service.launch(command_request, "capacity-retry", "session-a")
+
+    assert caught.value.code == "capacity_unavailable"
+    assert service.list_tasks("session-a") == []
+    assert client.launches == []
+
+    inspector.available = True
+    launched = service.launch(command_request, "capacity-retry", "session-a")
+    assert launched["state"] == "submitted"
+    assert len(client.launches) == 1
+
+
+def test_existing_idempotent_request_skips_new_capacity_check(
+    tmp_path, profile, command_request
+):
+    inspector = ToggleInspector(available=True)
+    service = ComputeService(
+        FakeClient(),
+        SQLiteTaskStore(tmp_path / "tasks.db"),
+        profile,
+        inspector=inspector,
+    )
+    first = service.launch(command_request, "existing-request", "session-a")
+    inspector.available = False
+
+    duplicate = service.launch(command_request, "existing-request", "session-a")
+
+    assert duplicate["task_id"] == first["task_id"]
+    assert len(inspector.calls) == 1
+
+
+def test_allow_queue_bypasses_admission_without_leaking_into_config(
+    tmp_path, profile, command_request
+):
+    inspector = ToggleInspector(available=False)
+    client = FakeClient()
+    service = ComputeService(
+        client,
+        SQLiteTaskStore(tmp_path / "tasks.db"),
+        profile,
+        inspector=inspector,
+    )
+    request = dict(command_request, allow_queue=True)
+
+    launched = service.launch(request, "queue-ok", "session-a")
+
+    assert launched["state"] == "submitted"
+    assert inspector.calls == []
+    assert "allow_queue" not in client.launches[0][1]
+
+
+def test_named_command_uses_display_name_and_reconciles(
+    tmp_path, profile, command_request
+):
+    client = UncertainClient()
+    service = ComputeService(client, SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    request = dict(
+        command_request,
+        name="pilot waypoint evaluation",
+        description="Evaluate the short validation route.",
+    )
+
+    with pytest.raises(SubmissionUncertainError) as caught:
+        service.launch(request, "named-command", "session-a")
+
+    description = client.launches[0][1]["description"]
+    assert description.splitlines() == [
+        "pilot waypoint evaluation",
+        "Evaluate the short validation route.",
+    ]
+    variables = client.launches[0][1]["environment"]["environment_variables"]
+    marker = next(
+        item.partition("=")[2]
+        for item in variables
+        if item.startswith("COMPUTE_SUBMISSION_MARKER=")
+    )
+    task_id = caught.value.details["task_id"]
+    client.entities[("command", "remote-named")] = {
+        "id": "remote-named",
+        "state": "RUNNING",
+        "submissionMarker": marker,
+        "config": {"description": description},
+    }
+
+    assert (
+        service.reconcile(task_id, "session-a", "remote-named")["remote_id"]
+        == "remote-named"
+    )
+
+
+def test_named_experiment_top_level_metadata_overrides_native_metadata(
+    tmp_path, profile
+):
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    request = {
+        "kind": "experiment",
+        "name": "skill retention pass 237",
+        "description": "Top-level operator description",
+        "workdir": "/shared/container/code",
+        "output_dir": "/shared/container/out",
+        "experiment_config": {
+            "name": "old generated experiment name",
+            "description": "Five-clip deterministic decoder evaluation",
+            "entrypoint": "python evaluate.py",
+        },
+    }
+
+    service.launch(request, "named-experiment", "session-a")
+    config = service.client.launches[0][1]
+    assert config["name"] == "skill retention pass 237"
+    assert config["description"] == "Top-level operator description"
+    assert "determined-compute:" not in config["description"]
+    assert any(
+        item.startswith("COMPUTE_SUBMISSION_MARKER=determined-compute:")
+        for item in config["environment"]["environment_variables"]
+    )
+
+
+def test_experiment_honors_native_metadata_without_top_level_values(tmp_path, profile):
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    plan = service.plan(
+        {
+            "kind": "experiment",
+            "workdir": "/shared/container/code",
+            "output_dir": "/shared/container/out",
+            "experiment_config": {
+                "name": "native experiment name",
+                "description": "native description",
+                "entrypoint": "python evaluate.py",
+            },
+        }
+    )
+
+    assert plan["name"] == "native experiment name"
+    assert plan["description"] == "native description"
+    assert plan["config"]["name"] == "native experiment name"
+    assert plan["config"]["description"] == "native description"
+    assert "generated_task_name" not in {item["code"] for item in plan["advisories"]}
+
+
+def test_unnamed_submission_generates_human_name_and_persists_it(
+    tmp_path, profile, command_request
+):
+    client = FakeClient()
+    service = ComputeService(client, SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+
+    task = service.launch(command_request, "unnamed-command", "session-a")
+
+    description = client.launches[0][1]["description"]
+    assert description == "command: code"
+    assert "determined-compute:" not in description
+    assert task["name"] == "command: code"
+    assert task["description"] is None
+    assert service.list_tasks("session-a")[0]["name"] == "command: code"
+
+
+def test_display_names_can_collide_without_colliding_task_identity(
+    tmp_path, profile, command_request
+):
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    request = dict(command_request, name="repeated human name")
+
+    first = service.launch(request, "request-a", "session-a")
+    second = service.launch(request, "request-b", "session-a")
+
+    assert first["name"] == second["name"] == "repeated human name"
+    assert first["task_id"] != second["task_id"]
+    assert first["remote_id"] != second["remote_id"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "x" * 129),
+        ("name", "bad\nname"),
+        ("description", "x" * 2049),
+        ("description", "bad\x00description"),
+    ],
+)
+def test_display_metadata_validation(tmp_path, profile, command_request, field, value):
+    service = ComputeService(FakeClient(), SQLiteTaskStore(tmp_path / "tasks.db"), profile)
+    with pytest.raises(ValidationError):
+        service.plan(dict(command_request, **{field: value}))
 
 
 def test_uncertain_submission_is_recorded_and_never_retried(
@@ -425,19 +790,64 @@ def test_reconcile_requires_remote_identity_marker(tmp_path, profile, command_re
     with pytest.raises(SubmissionUncertainError) as caught:
         service.launch(command_request, "request-1", "session-a")
     task_id = caught.value.details["task_id"]
-    marker = client.launches[0][1]["description"].split("\n", 1)[0]
+    marker = next(
+        item.partition("=")[2]
+        for item in client.launches[0][1]["environment"]["environment_variables"]
+        if item.startswith("COMPUTE_SUBMISSION_MARKER=")
+    )
     client.entities[("command", "remote-9")] = {
         "id": "remote-9",
         "state": "RUNNING",
-        "config": {"description": "wrong marker"},
+        "submissionMarker": "determined-compute:00000000-0000-0000-0000-000000000000",
+        "config": {
+            "description": service.store.get_owned(
+                task_id, "session-a"
+            ).submission_marker
+        },
     }
 
     with pytest.raises(ConflictError):
         service.reconcile(task_id, "session-a", "remote-9")
 
-    client.entities[("command", "remote-9")]["config"]["description"] = marker
+    client.entities[("command", "remote-9")]["submissionMarker"] = f"{marker}-wrong"
+    with pytest.raises(ConflictError):
+        service.reconcile(task_id, "session-a", "remote-9")
+
+    client.entities[("command", "remote-9")]["submissionMarker"] = marker
     reconciled = service.reconcile(task_id, "session-a", "remote-9")
     assert reconciled["remote_id"] == "remote-9"
+
+
+def test_reconcile_supports_legacy_first_line_description_marker(
+    tmp_path, profile, command_request
+):
+    client = FakeClient()
+    store = SQLiteTaskStore(tmp_path / "tasks.db")
+    service = ComputeService(client, store, profile)
+    plan = service.plan(command_request)
+    record, _ = store.claim(
+        request_id="legacy-request",
+        owner="session-a",
+        payload_hash=service._payload_hash(plan),
+        profile_hash=profile.fingerprint,
+        kind=plan["kind"],
+        code_revision=plan["code_revision"],
+        workdir=command_request["workdir"],
+        output_dir=command_request["output_dir"],
+        cluster_identity=service._cluster_identity(),
+    )
+    store.mark_uncertain(record.task_id)
+    assert record.name is None
+    assert record.description is None
+    client.entities[("command", "legacy-remote")] = {
+        "id": "legacy-remote",
+        "state": "RUNNING",
+        "config": {"description": record.submission_marker + "\nold human text"},
+    }
+
+    reconciled = service.reconcile(record.task_id, "session-a", "legacy-remote")
+
+    assert reconciled["remote_id"] == "legacy-remote"
 
 
 def test_secret_request_values_are_not_persisted(tmp_path, profile):
@@ -474,3 +884,40 @@ def test_profile_json_and_yaml(tmp_path):
     )
 
     assert ComputeProfile.from_file(json_path) == ComputeProfile.from_file(yaml_path)
+
+
+def test_store_additively_migrates_legacy_task_schema(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(db_path)
+    connection.executescript(
+        """
+        CREATE TABLE compute_tasks (
+            task_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, owner TEXT NOT NULL,
+            payload_hash TEXT NOT NULL, profile_hash TEXT NOT NULL, kind TEXT NOT NULL,
+            state TEXT NOT NULL, remote_id TEXT, remote_state TEXT, code_revision TEXT,
+            workdir TEXT NOT NULL, output_dir TEXT NOT NULL, cluster_identity TEXT,
+            submission_marker TEXT NOT NULL, error_code TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(owner, request_id)
+        );
+        INSERT INTO compute_tasks VALUES (
+            'legacy-task', 'legacy-request', 'session-a', 'hash', 'profile', 'command',
+            'submission_uncertain', NULL, NULL, 'rev', '/shared/code', '/shared/out',
+            'cluster', 'determined-compute:00000000-0000-0000-0000-000000000001',
+            'submission_uncertain', '2026-01-01T00:00:00.000Z',
+            '2026-01-01T00:00:00.000Z'
+        );
+        """
+    )
+    connection.close()
+
+    store = SQLiteTaskStore(db_path)
+    record = store.get_owned("legacy-task", "session-a")
+
+    assert record.name is None
+    assert record.description is None
+    columns = {
+        row[1]
+        for row in sqlite3.connect(db_path).execute("PRAGMA table_info(compute_tasks)")
+    }
+    assert {"name", "description"}.issubset(columns)

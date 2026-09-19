@@ -34,6 +34,9 @@ cluster_identity: optional-deployment-label
 mounts:
   - host_path: /shared/path/on/agents
     container_path: /path/inside/container
+  - host_path: /shared/reference/data
+    container_path: /reference/data
+    read_only: true
 defaults:
   image: verified-image
   pool: verified-pool
@@ -43,7 +46,7 @@ shell_inactivity_seconds: 7200
 
 Shared roots can include `/SSD`, `/SSD_home`, `/SSD_datasets`, `/SSD3`, `/SSD3_home`, `/SSD3_datasets`, and `/UNSAFE_SSD4`. Declare each available root in `mounts`; host paths refer to cluster agents and need not exist on the machine running the MCP client. The example profile maps these roots to the same container paths. Remove roots unavailable on your deployment.
 
-Mount mappings are required. Image, pool, and slot values are deployment defaults and can be overridden by a request. `shell_inactivity_seconds` is optional and has no service default. The value is advisory; the service does not enforce shell idle timeouts.
+Mount mappings are required. A mount may set `read_only: true`; the generated Determined bind mount preserves that restriction. `workdir` and `output_dir` must resolve under writable mounts. Uploads and explicit checkpoint targets must also be writable; reading or fetching reference data remains allowed. Host-path aliases use the most-specific configured host root, with read-only taking precedence for equal matches. This is a service policy, not a replacement for filesystem permissions. Omitting `read_only` keeps the existing writable default. Image, pool, and slot values are deployment defaults and can be overridden by a request. `shell_inactivity_seconds` is optional and has no service default. The value is advisory; the service does not enforce shell idle timeouts.
 
 ## Request and mode selection
 
@@ -51,6 +54,8 @@ A request can contain:
 
 | Field | Type | Purpose |
 | --- | --- | --- |
+| `name`, `description` | string | Client-chosen display name and task purpose |
+| `allow_queue` | boolean | Explicitly permit queuing; defaults to false |
 | `kind` | `auto`, `command`, `shell`, `experiment` | Requested execution mode |
 | `interactive` | boolean | Makes auto mode choose `shell` |
 | `overnight` | boolean | Makes auto mode choose `experiment` |
@@ -65,6 +70,10 @@ A request can contain:
 Auto mode selects `shell` for interactive requests, `experiment` for overnight requests or those carrying `experiment_config`, and `command` otherwise. An explicit `kind` is preserved; for example, an overnight command remains a command and receives an experiment advisory. Use `command` for a one-off job expected to finish in a working session, `shell` for iterative debugging, and `experiment` for durable/overnight work or actual experiment features such as search, trial tracking, and checkpoint lifecycle.
 
 `plan(request)` is offline and non-mutating. It returns the resolved `kind`, rendered `config`, `code_revision`, and `advisories`. Command and shell configs use `resources.slots`; experiments use `resources.slots_per_trial`. Planning must reject paths outside configured container mounts and source-upload fields. It does not authenticate, query the cluster, create projects, or launch work.
+
+New launches check current capacity in the requested pool unless `allow_queue: true` is explicit. GPU/CPU slot requests use schedulable agent slots; zero-slot tasks use auxiliary-container capacity. Insufficient or unknown capacity is reported before submission. `compute_resources(slots, pool)` and `determined-compute resources --slots N --pool POOL` expose the same live inventory. Alternative pools are suggestions, not automatic substitutions; capacity checks are snapshots, not reservations.
+
+Names and descriptions are provided by the MCP client. Commands and shells show the name on the first line of their description; experiments use their native name field. The internal submission marker is kept in a reserved environment variable and does not replace user-visible text.
 
 ## Determined adapter behavior
 
@@ -105,6 +114,10 @@ The tools are:
 
 | Tool | Arguments | Result |
 | --- | --- | --- |
+| `compute_resources` | optional `slots=1`, `pool` | Current scheduling capacity and candidate pools |
+| `storage_check` | `path` | Check a shared path locally or through the login node |
+| `storage_sync` | `local_dir`, `shared_dir`, optional `dry_run=true` | Preview or copy local files to shared storage |
+| `storage_fetch` | `shared_dir`, `local_dir`, optional `dry_run=true` | Preview or copy shared files locally |
 | `compute_plan` | `request` | Core plan object |
 | `compute_launch` | `request`, `request_id` | Persisted task object |
 | `compute_status` | `task_id` | Refreshed task object |
@@ -115,6 +128,10 @@ The tools are:
 | `compute_consult` | `question`, `request_id`, optional `context` | Persisted workflow object |
 | `workflow_status` | `workflow_id` | Current persisted workflow object |
 
+Launch requests may include an optional single-line `name`. Commands and shells use it
+as their Determined display description; experiments use it as the native experiment
+name. Top-level `name` and `description` override experiment-native metadata when supplied; otherwise the native values are retained. Display metadata is stored in SQLite and must not contain credentials.
+
 The owner is never a tool argument. On failure, MCP raises a tool error (`isError: true`) whose compact JSON content has the shape `{"error":{"code":"...","message":"...","retryable":false,"details":{...}}}`; `retryable` and `details` appear when available, and `structured_content` is null. Uncertain submission errors include their local task ID in details. Plan first, review resolved paths and advisories, and then launch with a stable request ID. Reusing that ID with identical content returns the established record; conflicting content is rejected.
 
 For a running shell, use the adapter's sanitized `reconnectCommand`, currently `det shell show_ssh_command <remote-id>`. The adapter removes `privateKey` from returned shell entities; do not copy private key material into task records, MCP context, or reports.
@@ -123,8 +140,12 @@ For a running shell, use the adapter's sanitized `reconnectCommand`, currently `
 
 Transport, authentication, permission, and response-shape failures are errors, not empty results. Authentication failure never causes local fallback. Task log calls request the newest records from Determined and return them in chronological order; an experiment with no trials returns an empty list.
 
-A network timeout during submission can leave acceptance uncertain. The service records that state and does not automatically resubmit, including after restart. MCP exposes `compute_reconcile(task_id, remote_id)` and the CLI exposes `determined-compute ... reconcile TASK_ID REMOTE_ID`. The core fetches that remote entity and binds it only when its unguessable submission marker matches the local record; a mismatch fails with `identity_mismatch`. Without verified evidence, investigate before any new launch.
+A network timeout during submission can leave acceptance uncertain. The service records that state and does not automatically resubmit, including after restart. MCP exposes `compute_reconcile(task_id, remote_id)` and the CLI exposes `determined-compute ... reconcile TASK_ID REMOTE_ID`. The core fetches that remote entity and binds it only when its unguessable submission marker matches the reserved `COMPUTE_SUBMISSION_MARKER` environment value; a mismatch fails with `identity_mismatch`. The API exposes only that validated marker while redacting other environment values. First-line description markers are supported only for migrated legacy records without stored display metadata. Without verified evidence, investigate before any new launch.
 
 Remote termination does not by itself prove success. Check exit information and the requested shared-storage artifacts or metrics before reporting completion. Reports may include sanitized commands, paths, task IDs, remote IDs, states, and errors; they must omit credential values and secret-file contents.
 
 For consultation worker setup and crash recovery, see [agent-workflow.md](agent-workflow.md).
+
+For local mounts, SSH agents, passwords, keyrings and connection reuse, see [shared-storage-access.md](shared-storage-access.md).
+
+An explicitly supplied `checkpoint_storage` must use `type: shared_fs` under writable profile roots. Its effective `storage_path` must remain inside `host_path`; legacy `checkpoint_path` and `tensorboard_path` aliases are rejected. If checkpoint storage is omitted, Determined uses its cluster default; the service cannot inspect that default during offline planning.

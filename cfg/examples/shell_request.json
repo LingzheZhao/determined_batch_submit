@@ -1,7 +1,10 @@
 {
+  "name": "debug-environment",
+  "description": "Inspect the project environment and reproduce the current issue interactively.",
   "kind": "shell",
   "interactive": true,
   "workdir": "/run/determined/workdir/home/compute/debug/example",
   "output_dir": "/run/determined/workdir/home/compute/debug/example/results",
-  "slots": 1
+  "slots": 1,
+  "allow_queue": false
 }

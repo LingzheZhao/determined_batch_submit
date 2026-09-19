@@ -9,8 +9,11 @@ Load this reference when preparing a service request, copying a workspace to sha
 | Field | Meaning |
 | --- | --- |
 | `kind` | `auto`, `command`, `shell`, or `experiment` |
+| `name` | Short task-specific display name; never an internal ID |
+| `description` | Purpose, config, or other useful human context |
 | `interactive` | Selects `shell` when `kind` is `auto` |
 | `overnight` | Selects `experiment` when `kind` is `auto` |
+| `allow_queue` | Per-call queue opt-in; defaults to `false` |
 | `command` | Command string or argument list |
 | `workdir` | Absolute container path covered by a configured mount |
 | `output_dir` | Absolute container path covered by a configured mount |
@@ -20,6 +23,8 @@ Load this reference when preparing a service request, copying a workspace to sha
 | `experiment_config` | Experiment-only configuration; selects `experiment` in auto mode |
 
 Auto mode otherwise resolves to `command`. Call `plan` before `launch`; planning is read-only.
+
+Call `compute_resources(slots=1, pool=None)` with the requested values before launch; `slots=0` checks auxiliary capacity. With `allow_queue: false`, launch admits a new request only when capacity is known and currently sufficient; a rejection creates no task or remote submission. `allow_queue: true` explicitly permits scheduler queueing for that request. Capacity is a race-prone snapshot rather than a reservation, and the service never switches pools or execution locations automatically.
 
 ## Shared storage
 
@@ -37,25 +42,42 @@ Translate paths by replacing the matching host prefix with its container prefix.
 
 For an unattended or durable run, copy or check out the exact revision into a revision-specific directory such as `/workspace/<user>/compute/runs/<project>/<revision>/repo`. Record the revision in the request. Reserve a mutable directory such as `/workspace/<user>/compute/debug/<project>` for interactive shells.
 
-When direct sync is needed, use an explicit destination and avoid `--delete`:
+When the client does not mount shared storage, use `storage_check`, then preview `storage_sync` or `storage_fetch`. Shared paths use the container namespace. Execute only after checking the resolved endpoints and exclusions. Read [the shared-storage access guide](../../../docs/shared-storage-access.md) for the separate storage config, SSH agent/password/keyring setup, and connection reuse.
+
+Keep `preserve_permissions: true` unless a verified mount rejects owner, group, permission, or directory-time preservation. For that mount, an operator may set it to `false`; never switch it automatically. Rsync exit 23 can leave a partial copy, so inspect and fix the cause, preview again, and do not retry blindly.
+
+For a manual local copy, use an explicit destination and avoid `--delete`:
 
 ```bash
-rsync -a \
+rsync -a --safe-links \
   --exclude '.git/' \
+  --exclude '.local/' \
+  --exclude '.cache/' \
+  --exclude 'cache/' \
   --exclude '.env' \
+  --exclude '*.env' \
   --exclude '.env.*' \
+  --exclude '*.env.*' \
   --exclude '.determined_compute.env' \
   --exclude '.secrets*' \
   --exclude '.ssh/' \
+  --exclude '.aws/' \
+  --exclude '.config/gcloud/' \
   --exclude '.netrc' \
   --exclude '.npmrc' \
   --exclude '.pypirc' \
+  --exclude '.venv/' \
   --exclude '*.pem' \
   --exclude '*.key' \
+  --exclude 'id_ed25519' \
+  --exclude 'id_rsa' \
+  --exclude '.credentials/' \
+  --exclude 'credentials/' \
   --exclude '*credentials*' \
   --exclude '*token*' \
   --exclude '__pycache__/' \
   --exclude '.pytest_cache/' \
+  --exclude '*.pyc' \
   <source>/ <shared-task-directory>/repo/
 ```
 

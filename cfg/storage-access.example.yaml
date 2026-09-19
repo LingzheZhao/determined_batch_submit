@@ -1,0 +1,18 @@
+# Client-side file access. This does not change the compute profile's bind_mounts.
+mode: auto
+connect_timeout_seconds: 10
+timeout_seconds: 120
+preserve_permissions: true  # Set false only for a mount that rejects owner/group/perms preservation.
+
+# Optional mappings when the client mounts storage at a different local path.
+local_mounts: []
+# local_mounts:
+#   - host_path: /SSD_home
+#     local_path: /Volumes/SSD_home
+
+# An existing OpenSSH Host alias for a login node with access to shared storage.
+ssh:
+  host: cluster-login
+  auth: openssh
+# password: SSH_USERNAME and SSH_PASSWORD come from --secrets-file.
+# keyring: set auth: keyring, user, and keyring_service (requires the keyring extra).

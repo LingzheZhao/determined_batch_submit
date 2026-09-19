@@ -1,4 +1,6 @@
 {
+  "name": "evaluate-checkpoint",
+  "description": "Evaluate the selected checkpoint and write results to the shared output directory.",
   "kind": "command",
   "command": [
     "bash",
@@ -8,5 +10,6 @@
   "workdir": "/run/determined/workdir/home/compute/runs/example/0123456789abcdef/repo",
   "output_dir": "/run/determined/workdir/home/compute/runs/example/0123456789abcdef/results",
   "slots": 1,
-  "code_revision": "0123456789abcdef"
+  "code_revision": "0123456789abcdef",
+  "allow_queue": false
 }

@@ -1,4 +1,6 @@
 {
+  "name": "train-baseline",
+  "description": "Train the baseline configuration with checkpoints and outputs on shared storage.",
   "kind": "experiment",
   "overnight": true,
   "command": [
@@ -11,7 +13,6 @@
   "slots": 1,
   "code_revision": "0123456789abcdef",
   "experiment_config": {
-    "name": "example-train-01234567",
     "searcher": {
       "name": "single",
       "metric": "validation_loss",
@@ -24,5 +25,6 @@
       "type": "shared_fs",
       "host_path": "/workspace/REPLACE_WITH_USER/compute/runs/example/0123456789abcdef/checkpoints"
     }
-  }
+  },
+  "allow_queue": false
 }

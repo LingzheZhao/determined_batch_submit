@@ -31,6 +31,25 @@ def request():
             'code_revision': 'abc'}
 
 
+@pytest.fixture(autouse=True)
+def mock_cluster_capacity(monkeypatch):
+    def get(url, **kwargs):
+        if url.endswith('/api/v1/resource-pools'):
+            return response({'resourcePools': [{
+                'name': 'verified-pool', 'numAgents': 1, 'slotsAvailable': 1,
+                'slotsUsed': 0, 'slotType': 'TYPE_CUDA',
+                'auxContainerCapacity': 8, 'auxContainersRunning': 0,
+            }]})
+        if url.endswith('/api/v1/agents'):
+            return response({'agents': [{
+                'id': 'agent-1', 'resourcePools': ['verified-pool'],
+                'enabled': True, 'draining': False,
+                'slots': {'0': {'id': '0', 'enabled': True, 'draining': False}},
+            }]})
+        raise AssertionError(f'unexpected API read: {url}')
+    monkeypatch.setattr(requests, 'get', get)
+
+
 def test_command_round_trip_keeps_shared_paths_and_identity_after_restart(tmp_path, monkeypatch):
     sent = []
     def post(url, **kwargs):

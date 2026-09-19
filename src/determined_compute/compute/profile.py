@@ -35,23 +35,34 @@ def _is_within(path: str, root: str) -> bool:
 class SharedMount:
     host_path: str
     container_path: str
+    read_only: bool = False
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any], index: int) -> "SharedMount":
         if not isinstance(value, Mapping):
             raise ValidationError(f"mounts[{index}] must be an object")
-        unknown = set(value) - {"host_path", "container_path"}
+        unknown = set(value) - {"host_path", "container_path", "read_only"}
         if unknown:
             raise ValidationError(f"mounts[{index}] has unknown fields: {sorted(unknown)}")
+        read_only = value.get("read_only", False)
+        if not isinstance(read_only, bool):
+            raise ValidationError(f"mounts[{index}].read_only must be a boolean")
         return cls(
             host_path=_absolute_clean_path(value.get("host_path"), f"mounts[{index}].host_path"),
             container_path=_absolute_clean_path(
                 value.get("container_path"), f"mounts[{index}].container_path"
             ),
+            read_only=read_only,
         )
 
-    def as_config(self) -> Dict[str, str]:
-        return {"host_path": self.host_path, "container_path": self.container_path}
+    def as_config(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "host_path": self.host_path,
+            "container_path": self.container_path,
+        }
+        if self.read_only:
+            result["read_only"] = True
+        return result
 
 
 @dataclass(frozen=True)
@@ -149,9 +160,25 @@ class ComputeProfile:
 
     def validate_container_path(self, value: Any, field: str) -> str:
         path = _absolute_clean_path(value, field)
-        if not any(_is_within(path, mount.container_path) for mount in self.mounts):
+        mount = next(
+            (mount for mount in self.mounts if _is_within(path, mount.container_path)),
+            None,
+        )
+        if mount is None:
             roots = ", ".join(mount.container_path for mount in self.mounts)
             raise ValidationError(f"{field} is outside configured shared container roots: {roots}")
+        return path
+
+    def validate_writable_container_path(self, value: Any, field: str) -> str:
+        path = self.validate_container_path(value, field)
+        mount = next(
+            mount for mount in self.mounts if _is_within(path, mount.container_path)
+        )
+        if mount.read_only:
+            raise ValidationError(f"{field} is under a read-only shared mount")
+        relative = posixpath.relpath(path, mount.container_path)
+        host_path = mount.host_path if relative == "." else posixpath.join(mount.host_path, relative)
+        self.validate_writable_host_path(host_path, field)
         return path
 
     def validate_host_path(self, value: Any, field: str) -> str:
@@ -159,6 +186,14 @@ class ComputeProfile:
         if not any(_is_within(path, mount.host_path) for mount in self.mounts):
             roots = ", ".join(mount.host_path for mount in self.mounts)
             raise ValidationError(f"{field} is outside configured shared host roots: {roots}")
+        return path
+
+    def validate_writable_host_path(self, value: Any, field: str) -> str:
+        path = self.validate_host_path(value, field)
+        matches = [mount for mount in self.mounts if _is_within(path, mount.host_path)]
+        specificity = max(len(mount.host_path) for mount in matches)
+        if any(mount.read_only for mount in matches if len(mount.host_path) == specificity):
+            raise ValidationError(f"{field} is under a read-only shared mount")
         return path
 
     @property

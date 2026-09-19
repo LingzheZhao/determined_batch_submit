@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
@@ -255,6 +256,64 @@ class DeterminedAPIClient:
         return value
 
     @staticmethod
+    def _valid_submission_marker(value: Any) -> Optional[str]:
+        if not isinstance(value, str) or not value.startswith("determined-compute:"):
+            return None
+        identifier = value.partition(":")[2]
+        try:
+            parsed = uuid.UUID(identifier)
+        except (ValueError, AttributeError):
+            return None
+        canonical = f"determined-compute:{parsed}"
+        return canonical if value == canonical else None
+
+    @classmethod
+    def _marker_from_environment_variables(cls, value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            name, separator, marker = value.partition("=")
+            if separator and name == "COMPUTE_SUBMISSION_MARKER":
+                return cls._valid_submission_marker(marker)
+            return None
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                marker = cls._marker_from_environment_variables(item)
+                if marker is not None:
+                    return marker
+            return None
+        if isinstance(value, Mapping):
+            direct = value.get("COMPUTE_SUBMISSION_MARKER")
+            marker = cls._valid_submission_marker(direct)
+            if marker is not None:
+                return marker
+            # Determined may return platform sections such as cpu/cuda/rocm.
+            for item in value.values():
+                marker = cls._marker_from_environment_variables(item)
+                if marker is not None:
+                    return marker
+        return None
+
+    @classmethod
+    def _submission_marker_from_config(cls, config: Any) -> Optional[str]:
+        if isinstance(config, str):
+            try:
+                config = yaml.safe_load(config)
+            except yaml.YAMLError:
+                return None
+        if not isinstance(config, Mapping):
+            return None
+        environment = config.get("environment")
+        nested_variables = (
+            environment.get("environment_variables")
+            if isinstance(environment, Mapping)
+            else None
+        )
+        for variables in (nested_variables, config.get("environment_variables")):
+            marker = cls._marker_from_environment_variables(variables)
+            if marker is not None:
+                return marker
+        return None
+
+    @staticmethod
     def _upload_fields(value: Any, path: str = "config") -> List[str]:
         forbidden = {
             "context",
@@ -296,9 +355,19 @@ class DeterminedAPIClient:
     def get_task(self, kind: str, task_id: str) -> Dict[str, Any]:
         kind = self._kind(kind)
         response = self._get(f"api/v1/{kind}s/{task_id}")
-        entity = dict(self._entity(response, kind))
-        if isinstance(response.get("config"), dict):
-            entity["config"] = self._redact_secrets(response["config"])
+        entity = self._redact_secrets(dict(self._entity(response, kind)))
+        entity.pop("submissionMarker", None)
+        config = response.get("config")
+        marker = self._submission_marker_from_config(config)
+        if marker is not None:
+            entity["submissionMarker"] = marker
+        if isinstance(config, str):
+            try:
+                config = yaml.safe_load(config)
+            except yaml.YAMLError:
+                config = None
+        if isinstance(config, Mapping):
+            entity["config"] = self._redact_secrets(dict(config))
         return self._safe_shell(entity) if kind == "shell" else entity
 
     def task_logs(self, kind: str, task_id: str, tail: int = 100) -> List[Dict[str, Any]]:

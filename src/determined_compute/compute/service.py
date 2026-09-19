@@ -5,8 +5,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import posixpath
 import re
 import shlex
+import unicodedata
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
 
@@ -23,6 +26,9 @@ from .store import SQLiteTaskStore
 
 _REQUEST_FIELDS = {
     "kind",
+    "name",
+    "description",
+    "allow_queue",
     "interactive",
     "overnight",
     "command",
@@ -34,6 +40,9 @@ _REQUEST_FIELDS = {
     "code_revision",
     "experiment_config",
 }
+_NAME_MAX_LENGTH = 128
+_DESCRIPTION_MAX_LENGTH = 2048
+_SUBMISSION_MARKER_VARIABLE = "COMPUTE_SUBMISSION_MARKER"
 _FORBIDDEN_FIELDS = {
     "context",
     "contextdir",
@@ -72,6 +81,44 @@ def _required_text(value: Any, field: str) -> str:
     return value
 
 
+def _display_name(value: Any, field: str = "name") -> str:
+    if not isinstance(value, str):
+        raise ValidationError(f"{field} must be a string")
+    result = value.strip()
+    if not result:
+        raise ValidationError(f"{field} must not be empty")
+    if len(result) > _NAME_MAX_LENGTH:
+        raise ValidationError(f"{field} must be at most {_NAME_MAX_LENGTH} characters")
+    if any(
+        unicodedata.category(character).startswith("C")
+        or unicodedata.category(character) in {"Zl", "Zp"}
+        for character in result
+    ):
+        raise ValidationError(f"{field} must not contain control characters")
+    return result
+
+
+def _display_description(value: Any, field: str = "description") -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValidationError(f"{field} must be a string or null")
+    result = value.strip()
+    if not result:
+        return None
+    if len(result) > _DESCRIPTION_MAX_LENGTH:
+        raise ValidationError(
+            f"{field} must be at most {_DESCRIPTION_MAX_LENGTH} characters"
+        )
+    if any(
+        unicodedata.category(character).startswith("C")
+        and character not in {"\n", "\t"}
+        for character in result
+    ):
+        raise ValidationError(f"{field} contains an unsupported control character")
+    return result
+
+
 def _remote_id(entity: Any) -> str:
     if not isinstance(entity, Mapping):
         raise SubmissionUncertainError("launch response was not an object")
@@ -100,6 +147,7 @@ class ComputeService:
         store: SQLiteTaskStore,
         profile: ComputeProfile,
         submission_stale_seconds: int = 300,
+        inspector: Any = None,
     ) -> None:
         if (
             isinstance(submission_stale_seconds, bool)
@@ -111,6 +159,7 @@ class ComputeService:
         self.store = store
         self.profile = profile
         self.submission_stale_seconds = submission_stale_seconds
+        self.inspector = inspector
 
     def plan(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and normalize a request without contacting Determined."""
@@ -127,8 +176,15 @@ class ComputeService:
             raise ValidationError("kind must be auto, command, shell, or experiment")
         interactive = request.get("interactive", False)
         overnight = request.get("overnight", False)
-        if not isinstance(interactive, bool) or not isinstance(overnight, bool):
-            raise ValidationError("interactive and overnight must be booleans")
+        allow_queue = request.get("allow_queue", False)
+        if (
+            not isinstance(interactive, bool)
+            or not isinstance(overnight, bool)
+            or not isinstance(allow_queue, bool)
+        ):
+            raise ValidationError(
+                "interactive, overnight, and allow_queue must be booleans"
+            )
         experiment_config = request.get("experiment_config")
         if experiment_config is not None and not isinstance(experiment_config, Mapping):
             raise ValidationError("experiment_config must be an object")
@@ -147,8 +203,12 @@ class ComputeService:
         if experiment_config is not None and kind != "experiment":
             raise ValidationError("experiment_config requires experiment kind")
 
-        workdir = self.profile.validate_container_path(request.get("workdir"), "workdir")
-        output_dir = self.profile.validate_container_path(request.get("output_dir"), "output_dir")
+        workdir = self.profile.validate_writable_container_path(
+            request.get("workdir"), "workdir"
+        )
+        output_dir = self.profile.validate_writable_container_path(
+            request.get("output_dir"), "output_dir"
+        )
         slots = request.get("slots", self.profile.default_slots)
         if isinstance(slots, bool) or not isinstance(slots, int) or slots < 0:
             raise ValidationError("slots must be a non-negative integer")
@@ -159,10 +219,39 @@ class ComputeService:
         code_revision = request.get("code_revision")
         if code_revision is not None and not isinstance(code_revision, str):
             raise ValidationError("code_revision must be a string or null")
+        requested_name = request.get("name")
+        requested_description = request.get("description")
+        if requested_name is not None:
+            name = _display_name(requested_name)
+        elif (
+            kind == "experiment"
+            and experiment_config is not None
+            and experiment_config.get("name") is not None
+        ):
+            name = _display_name(
+                experiment_config["name"], "experiment_config.name"
+            )
+        else:
+            name = None
+        if requested_description is not None:
+            description = _display_description(requested_description)
+        elif kind == "experiment" and experiment_config is not None:
+            description = _display_description(
+                experiment_config.get("description"),
+                "experiment_config.description",
+            )
+        else:
+            description = None
+        generated_name = name is None
+        if generated_name:
+            basename = PurePosixPath(workdir).name or "shared-root"
+            name = _display_name(f"{kind}: {basename}")
 
         if kind == "experiment":
             config = self._experiment_config(
                 experiment_config,
+                name,
+                description,
                 request.get("command"),
                 workdir,
                 output_dir,
@@ -173,10 +262,29 @@ class ComputeService:
             )
         else:
             config = self._task_config(
-                kind, request, workdir, output_dir, slots, pool, image, code_revision
+                kind,
+                request,
+                name,
+                description,
+                workdir,
+                output_dir,
+                slots,
+                pool,
+                image,
+                code_revision,
             )
 
         advisories: List[Dict[str, Any]] = []
+        if generated_name:
+            advisories.append(
+                {
+                    "code": "generated_task_name",
+                    "message": (
+                        f"Generated task name '{name}'. Supply name and description "
+                        "to make task lists easier to scan."
+                    ),
+                }
+            )
         if overnight and kind != "experiment":
             advisories.append(
                 {
@@ -197,6 +305,9 @@ class ComputeService:
             )
         return {
             "kind": kind,
+            "name": name,
+            "description": description,
+            "allow_queue": allow_queue,
             "config": config,
             "code_revision": code_revision,
             "advisories": advisories,
@@ -234,6 +345,8 @@ class ComputeService:
         self,
         kind: str,
         request: Mapping[str, Any],
+        name: str,
+        description: Optional[str],
         workdir: str,
         output_dir: str,
         slots: int,
@@ -243,6 +356,9 @@ class ComputeService:
     ) -> Dict[str, Any]:
         config = self._base_config(
             kind, workdir, output_dir, slots, pool, image, code_revision
+        )
+        config["description"] = name + (
+            ("\n" + description) if description is not None else ""
         )
         command = request.get("command")
         if kind == "command":
@@ -260,6 +376,8 @@ class ComputeService:
     def _experiment_config(
         self,
         value: Optional[Mapping[str, Any]],
+        name: str,
+        description: Optional[str],
         command: Any,
         workdir: str,
         output_dir: str,
@@ -270,12 +388,36 @@ class ComputeService:
     ) -> Dict[str, Any]:
         config = copy.deepcopy(dict(value or {}))
         self._validate_config_paths(config)
+        checkpoint = config.get("checkpoint_storage")
+        if checkpoint is not None:
+            if not isinstance(checkpoint, Mapping) or checkpoint.get("type") != "shared_fs":
+                raise ValidationError("checkpoint_storage must be a shared_fs configuration on mapped storage")
+            if any(_normalized_key(key) in {"checkpointpath", "tensorboardpath"} for key in checkpoint):
+                raise ValidationError("checkpoint_storage must use storage_path instead of legacy path aliases")
+            checkpoint_root = self.profile.validate_writable_host_path(
+                checkpoint.get("host_path"), "experiment_config.checkpoint_storage.host_path"
+            )
+            if checkpoint.get("storage_path") is not None:
+                storage_path = checkpoint["storage_path"]
+                if not isinstance(storage_path, str):
+                    raise ValidationError("checkpoint_storage.storage_path must be a string")
+                resolved_storage = self.profile.validate_writable_host_path(
+                    posixpath.join(checkpoint_root, storage_path),
+                    "experiment_config.checkpoint_storage.storage_path",
+                )
+                if resolved_storage != checkpoint_root and not resolved_storage.startswith(checkpoint_root.rstrip("/") + "/"):
+                    raise ValidationError("checkpoint_storage.storage_path must remain inside host_path")
+            if checkpoint.get("container_path") is not None:
+                self.profile.validate_writable_container_path(
+                    checkpoint["container_path"], "experiment_config.checkpoint_storage.container_path"
+                )
         if "bind_mounts" in config or "bindMounts" in config:
             raise ValidationError("experiment bind mounts come only from the compute profile")
-        if config.get("description") is not None and not isinstance(
-            config["description"], str
-        ):
-            raise ValidationError("experiment_config.description must be a string")
+        config["name"] = name
+        if description is None:
+            config.pop("description", None)
+        else:
+            config["description"] = description
 
         resources = config.get("resources", {})
         if not isinstance(resources, Mapping):
@@ -292,7 +434,12 @@ class ComputeService:
         variables = environment.get("environment_variables", [])
         if not isinstance(variables, list) or not all(isinstance(item, str) for item in variables):
             raise ValidationError("environment.environment_variables must be a list of strings")
-        managed_names = {"COMPUTE_WORKDIR", "COMPUTE_OUTPUT_DIR", "COMPUTE_CODE_REVISION"}
+        managed_names = {
+            "COMPUTE_WORKDIR",
+            "COMPUTE_OUTPUT_DIR",
+            "COMPUTE_CODE_REVISION",
+            _SUBMISSION_MARKER_VARIABLE,
+        }
         for item in variables:
             if item.split("=", 1)[0] in managed_names:
                 raise ValidationError("compute-managed environment variables cannot be overridden")
@@ -356,6 +503,23 @@ class ComputeService:
         owner = _required_text(owner, "owner")
         plan = self.plan(request)
         payload_hash = self._payload_hash(plan)
+        existing = self.store.lookup_request(request_id, owner)
+        if existing is not None:
+            self._validate_idempotent_payload(existing, payload_hash, request, plan)
+            return self._public(existing)
+
+        if not plan["allow_queue"]:
+            try:
+                self._inspector().require_capacity(plan["kind"], plan["config"])
+            except APIError:
+                # A concurrent process may have claimed this id after our lookup.
+                existing = self.store.lookup_request(request_id, owner)
+                if existing is not None:
+                    self._validate_idempotent_payload(
+                        existing, payload_hash, request, plan
+                    )
+                    return self._public(existing)
+                raise
         workdir = self.profile.validate_container_path(request.get("workdir"), "workdir")
         output_dir = self.profile.validate_container_path(request.get("output_dir"), "output_dir")
         record, created = self.store.claim(
@@ -365,6 +529,8 @@ class ComputeService:
             profile_hash=self.profile.fingerprint,
             kind=plan["kind"],
             code_revision=plan["code_revision"],
+            name=plan["name"],
+            description=plan["description"],
             workdir=workdir,
             output_dir=output_dir,
             cluster_identity=self._cluster_identity(),
@@ -392,6 +558,64 @@ class ComputeService:
             error = SubmissionUncertainError("remote submission outcome is uncertain")
             self._attach_task_details(error, record)
             raise error from exc
+
+    def _inspector(self) -> Any:
+        if self.inspector is None:
+            from .admission import ResourceInspector
+
+            self.inspector = ResourceInspector(self.client)
+        return self.inspector
+
+    def _validate_idempotent_payload(
+        self,
+        record: TaskRecord,
+        payload_hash: str,
+        request: Mapping[str, Any],
+        plan: Mapping[str, Any],
+    ) -> None:
+        if record.payload_hash == payload_hash:
+            return
+        new_fields = {"name", "description", "allow_queue"}
+        legacy_record = record.name is None and record.description is None
+        legacy_request = not new_fields.intersection(request)
+        if (
+            legacy_record
+            and legacy_request
+            and record.payload_hash == self._legacy_payload_hash(plan, request)
+        ):
+            return
+        raise ConflictError(
+            "request_id was already used with a different request",
+            code="idempotency_conflict",
+        )
+
+    def _legacy_payload_hash(
+        self, plan: Mapping[str, Any], request: Mapping[str, Any]
+    ) -> str:
+        """Reconstruct the 0.4 plan hash for migrated task rows only."""
+
+        config = copy.deepcopy(dict(plan["config"]))
+        if plan["kind"] == "experiment":
+            original = request.get("experiment_config")
+            original = original if isinstance(original, Mapping) else {}
+            for field in ("name", "description"):
+                if field in original:
+                    config[field] = copy.deepcopy(original[field])
+                else:
+                    config.pop(field, None)
+        else:
+            config.pop("description", None)
+        legacy_plan = {
+            "kind": plan["kind"],
+            "config": config,
+            "code_revision": plan["code_revision"],
+            "advisories": [
+                copy.deepcopy(item)
+                for item in plan["advisories"]
+                if item.get("code") != "generated_task_name"
+            ],
+        }
+        return self._payload_hash(legacy_plan)
 
     def _best_effort_submission_state(self, task_id: str, state: str) -> None:
         try:
@@ -468,8 +692,18 @@ class ComputeService:
         if record.state not in {"pending", "submitting", "submission_uncertain"}:
             raise ConflictError("task is not eligible for reconciliation")
         entity = self.client.get_task(record.kind, remote_id)
-        description = self._entity_description(entity)
-        if not description or description.split("\n", 1)[0] != record.submission_marker:
+        marker = entity.get("submissionMarker") if isinstance(entity, Mapping) else None
+        legacy_match = (
+            record.name is None
+            and record.description is None
+            and any(
+                self._legacy_description_marker(
+                    description, record.submission_marker
+                )
+                for description in self._entity_descriptions(entity)
+            )
+        )
+        if marker != record.submission_marker and not legacy_match:
             raise ConflictError(
                 "remote task identity marker does not match; refusing unsafe binding",
                 code="identity_mismatch",
@@ -565,26 +799,48 @@ class ComputeService:
     @staticmethod
     def _with_submission_marker(config: Mapping[str, Any], marker: str) -> Dict[str, Any]:
         result = copy.deepcopy(dict(config))
-        description = result.get("description")
-        if description is not None and not isinstance(description, str):
-            raise ValidationError("config description must be a string")
-        result["description"] = marker + (("\n" + description) if description else "")
+        environment = result.get("environment")
+        if not isinstance(environment, Mapping):
+            raise ValidationError("config environment must be an object")
+        environment = copy.deepcopy(dict(environment))
+        variables = environment.get("environment_variables")
+        if not isinstance(variables, list) or not all(
+            isinstance(item, str) for item in variables
+        ):
+            raise ValidationError(
+                "config environment.environment_variables must be a list of strings"
+            )
+        for item in variables:
+            if item.split("=", 1)[0] == _SUBMISSION_MARKER_VARIABLE:
+                raise ValidationError(
+                    f"{_SUBMISSION_MARKER_VARIABLE} is reserved for task identity"
+                )
+        environment["environment_variables"] = list(variables) + [
+            f"{_SUBMISSION_MARKER_VARIABLE}={marker}"
+        ]
+        result["environment"] = environment
         return result
 
     @staticmethod
-    def _entity_description(entity: Any) -> Optional[str]:
+    def _legacy_description_marker(
+        description: Optional[str], marker: str
+    ) -> bool:
+        if not description:
+            return False
+        # Backward compatibility only: pre-metadata jobs used the first line.
+        return description.splitlines()[0] == marker
+
+    @staticmethod
+    def _entity_descriptions(entity: Any) -> Sequence[str]:
         if not isinstance(entity, Mapping):
-            return None
+            return ()
         candidates: Sequence[Any] = (
             entity.get("description"),
             entity.get("config", {}).get("description")
             if isinstance(entity.get("config"), Mapping)
             else None,
         )
-        for candidate in candidates:
-            if isinstance(candidate, str):
-                return candidate
-        return None
+        return tuple(candidate for candidate in candidates if isinstance(candidate, str))
 
 
 __all__ = ["ComputeService"]

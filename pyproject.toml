@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "determined-compute"
-version = "0.4.0"
+version = "0.5.0"
 description = "Persistent shared-storage compute service and MCP tools for Determined"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+keyring = [
+    "keyring>=25,<27",
+]
 mcp = [
     "mcp>=2,<3",
 ]
