@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from determined_batch.core.api_client import DeterminedAPIClient
@@ -28,29 +27,29 @@ class ExperimentService:
         if states:
             api_states = [f"STATE_{s.value}" for s in states]
         elif state_names:
-            api_states = [f"STATE_{name.upper()}" for name in state_names]
+            api_states = [
+                f"STATE_{'QUEUED' if name.upper() == 'QUEUE' else name.upper()}"
+                for name in state_names
+            ]
 
         experiments_data = self.api_client.get_experiments(limit=limit, offset=offset, states=api_states)
-        experiments: List[Experiment] = []
-        for exp_data in experiments_data:
-            try:
-                experiments.append(Experiment.from_api_data(exp_data))
-            except Exception:
-                continue
-        return experiments
+        return [Experiment.from_api_data(exp_data) for exp_data in experiments_data]
 
-    def get_experiment(self, experiment_id: int) -> Optional[Experiment]:
-        try:
-            data = self.api_client.get_experiment(str(experiment_id))
-            return Experiment.from_api_data(data)
-        except Exception:
-            return None
+    def get_experiment(self, experiment_id: int) -> Experiment:
+        response = self.api_client.get_experiment(str(experiment_id))
+        data = response.get("experiment") if isinstance(response, dict) else None
+        if not isinstance(data, dict):
+            from determined_batch.core.api_client import APIError
+
+            raise APIError(
+                "Experiment response had no experiment object",
+                code="invalid_response",
+                details=response,
+            )
+        return Experiment.from_api_data(data)
 
     def get_experiment_logs(self, experiment_id: int, tail: int = 100) -> Optional[str]:
-        try:
-            return self.api_client.get_experiment_logs(str(experiment_id), tail=tail)
-        except Exception:
-            return None
+        return self.api_client.get_experiment_logs(str(experiment_id), tail=tail)
 
     # ------------------------------------------------------------------
     # Filtering helpers
@@ -68,7 +67,7 @@ class ExperimentService:
                 ExperimentState.RUNNING,
                 ExperimentState.STARTING,
                 ExperimentState.PULLING,
-                ExperimentState.QUEUE,
+                ExperimentState.QUEUED,
             ]
         )
 
@@ -80,43 +79,29 @@ class ExperimentService:
     # Mutations
     # ------------------------------------------------------------------
     def delete_experiment(self, experiment_id: int) -> bool:
-        try:
-            self.api_client.delete_experiment(experiment_id)
-            return True
-        except Exception:
-            return False
+        self.api_client.delete_experiment(experiment_id)
+        return True
 
     def kill_experiment(self, experiment_id: int) -> bool:
-        try:
-            self.api_client.kill_experiment(experiment_id)
-            return True
-        except Exception:
-            return False
+        self.api_client.kill_experiment(experiment_id)
+        return True
 
     def cancel_experiment(self, experiment_id: int) -> bool:
-        try:
-            self.api_client.cancel_experiment(experiment_id)
-            return True
-        except Exception:
-            return False
+        self.api_client.cancel_experiment(experiment_id)
+        return True
 
     def delete_experiments(self, experiment_ids: List[int], project_id: Optional[int] = None) -> Dict[int, bool]:
         results: Dict[int, bool] = {}
-        try:
-            payload = self.api_client.delete_experiments(experiment_ids, project_id=project_id)
-            if "results" in payload:
-                for result in payload["results"]:
-                    exp_id = result.get("id")
-                    if exp_id is None:
-                        continue
-                    results[int(exp_id)] = result.get("error") is None
-                return results
-        except Exception:
-            pass
+        payload = self.api_client.delete_experiments(experiment_ids, project_id=project_id)
+        payload_results = payload.get("results")
+        if not isinstance(payload_results, list):
+            from determined_batch.core.api_client import APIError
 
-        # Fallback to deleting one by one
-        for exp_id in experiment_ids:
-            results[exp_id] = self.delete_experiment(exp_id)
+            raise APIError("Delete response had no results array", code="invalid_response")
+        for result in payload_results:
+            exp_id = result.get("id")
+            if exp_id is not None:
+                results[int(exp_id)] = result.get("error") is None
         return results
 
 

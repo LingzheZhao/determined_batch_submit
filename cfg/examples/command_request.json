@@ -1,0 +1,12 @@
+{
+  "kind": "command",
+  "command": [
+    "bash",
+    "-lc",
+    "python scripts/evaluate.py --output \"$COMPUTE_OUTPUT_DIR/eval.json\""
+  ],
+  "workdir": "/run/determined/workdir/home/compute/runs/example/0123456789abcdef/repo",
+  "output_dir": "/run/determined/workdir/home/compute/runs/example/0123456789abcdef/results",
+  "slots": 1,
+  "code_revision": "0123456789abcdef"
+}

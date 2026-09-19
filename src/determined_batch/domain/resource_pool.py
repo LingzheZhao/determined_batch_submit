@@ -46,15 +46,20 @@ class ResourcePool:
     total_slots: int = 0
     used_slots: int = 0
     available_slots: int = 0
+    capacity_known: bool = False
 
     @classmethod
     def from_api_data(cls, data: Dict[str, Any], slots: Optional[List[Slot]] = None) -> "ResourcePool":
         pool_name = data.get("name", "") if isinstance(data, dict) else ""
-        total_slots = 0
-        used_slots = 0
-        available_slots = 0
-        if slots:
-            pool_slots = [s for s in slots if s.resource_pool == pool_name]
+        pool_slots = None if slots is None else [s for s in slots if s.resource_pool == pool_name]
+        has_api_capacity = isinstance(data, dict) and isinstance(data.get("slotsAvailable"), int) and isinstance(data.get("slotsUsed"), int)
+        if has_api_capacity:
+            total_slots = int(data["slotsAvailable"])
+            used_slots = int(data["slotsUsed"])
+            available_slots = max(0, total_slots - used_slots)
+        else:
+            total_slots = used_slots = available_slots = 0
+        if not has_api_capacity and pool_slots is not None:
             total_slots = len(pool_slots)
             used_slots = len([s for s in pool_slots if not s.is_available()])
             available_slots = total_slots - used_slots
@@ -62,10 +67,11 @@ class ResourcePool:
         return cls(
             name=pool_name,
             description=data.get("description") if isinstance(data, dict) else None,
-            slots=slots,
+            slots=pool_slots,
             total_slots=total_slots,
             used_slots=used_slots,
             available_slots=available_slots,
+            capacity_known=has_api_capacity or slots is not None,
         )
 
     def get_utilization_rate(self) -> float:
@@ -83,6 +89,7 @@ class ResourcePool:
             "total_slots": self.total_slots,
             "used_slots": self.used_slots,
             "available_slots": self.available_slots,
+            "capacity_known": self.capacity_known,
             "utilization_rate": self.get_utilization_rate(),
         }
 

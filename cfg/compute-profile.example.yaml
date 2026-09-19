@@ -1,0 +1,15 @@
+# Copy this file outside version control and replace every placeholder.
+# Values describe one deployment; old image and pool examples are not defaults.
+cluster_identity: "REPLACE_WITH_CLUSTER_NAME"
+
+mounts:
+  - host_path: "/workspace/REPLACE_WITH_USER"
+    container_path: "/run/determined/workdir/home"
+
+defaults:
+  image: "REPLACE_WITH_VERIFIED_IMAGE"
+  pool: "REPLACE_WITH_VERIFIED_POOL"
+  slots: 1
+
+# Advisory deployment convention. Determined itself does not guarantee this.
+shell_inactivity_seconds: 7200

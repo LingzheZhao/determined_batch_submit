@@ -1,94 +1,80 @@
-# determined-batch
+# Determined Compute Service
 
-Lightweight utilities for submitting many Determined AI experiments without
-carrying project-specific baggage. The installable package lives under
-`src/determined_batch`; examples and upstream references stay outside the
-package so end users only install the reusable code.
+[中文](README.zh.md)
 
-## Features
-- Minimal `DeterminedAPIClient` wrapper around the REST API (submit, list, delete).
-- Higher-level services for experiments and resource pools.
-- Batch submission helpers (`submit_directory`) plus an `argparse` CLI
-  (`determined-batch`) for quick use from the shell.
-- Clean separation of examples/templates from installable code.
+Run Determined jobs through MCP or a JSON CLI. Code, data and outputs stay on mapped shared storage; no project uploads. Use `command` for one-off jobs, `shell` for interactive debugging, and `experiment` for long-running training or trial management.
 
 ## Install
+
+Requires Python 3.10+ and access to a Determined cluster with shared storage.
+
 ```bash
-git clone https://github.com/LingzheZhao/determined_batch_submit
+git clone https://github.com/LingzheZhao/determined_batch_submit.git
 cd determined_batch_submit
-python -m pip install -e .
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e '.[mcp]'
 ```
-Requires Python 3.8+ and the `requests`/`pyyaml` dependencies declared in
-`pyproject.toml`.
 
-## Quick start (toy example)
-This launches a lightweight matrix-multiply loop so you can validate connectivity
-and then stop the run when you are done.
+## Configure
 
-1) Configure paths and sync the example to the shared home:
 ```bash
-export TOY_USERNAME=peter
-export LOCAL_PROJECT_ROOT=/path/to/determined_batch_submit
-export REMOTE_PROJECT_ROOT=/workspace/${TOY_USERNAME}/determined_batch_submit
-export MOUNTED_REMOTE_PROJECT_ROOT=/run/user/1000/gvfs/sftp:host=login/workspace/${TOY_USERNAME}/determined_batch_submit
-
-# Update cfg/examples/toy_matrix_loop_6000ada.yaml to match your username/project root.
-rsync -a --delete "${LOCAL_PROJECT_ROOT}/scripts/examples/toy_example/" \
-  "${MOUNTED_REMOTE_PROJECT_ROOT}/scripts/examples/toy_example/"
+mkdir -p .local
+cp cfg/compute-profile.example.yaml .local/profile.yaml
+cp cfg/examples/command_request.json .local/request.json
 ```
 
-2) Submit the experiment (uses the 6000 Ada pool config):
+Edit `profile.yaml` with your shared host/container paths, image and resource pool. Edit `request.json` with your command and mapped **container paths** for `workdir` and `output_dir`. Place the workload on shared storage before launching.
+
+Create `.local/credentials.env`:
+
+```dotenv
+DET_MASTER=https://your-determined-server
+DET_API_TOKEN=your-api-token
+```
+
+Username/password authentication also supports `DET_USERNAME` and `DET_PASSWORD` in this file. Keep the SQLite database on local disk, outside shared NFS storage.
+
+## Connect an MCP client
+
+For Codex, run from the repository root:
+
 ```bash
-export DETERMINED_BATCH_SECRETS=/path/to/.secrets.env
-
-export DET_MASTER=http://10.0.1.66:8080
-
-determined-batch submit \
-  --config cfg/examples/toy_matrix_loop_6000ada.yaml
+codex mcp add determined-compute -- \
+  "$PWD/.venv/bin/determined-compute-mcp" \
+  --profile "$PWD/.local/profile.yaml" \
+  --db "$PWD/.local/tasks.sqlite3" \
+  --owner "$USER" \
+  --repo-root "$PWD" \
+  --secrets-file "$PWD/.local/credentials.env" \
+  --verify-ssl
 ```
 
-3) Kill the experiment when you are done:
+Other MCP clients can launch the same executable and arguments using stdio. Use absolute paths. Sessions with the same database and owner share task records; owner names are namespaces, not authentication.
+
+1. Call `compute_plan(request)` with the contents of `request.json`.
+2. Call `compute_launch(request, request_id)` and keep the returned `task_id`.
+3. Use `compute_status(task_id)` and `compute_logs(task_id)` to follow progress; `compute_cancel(task_id)` stops the task.
+
+Reuse the same `request_id` when retrying the same launch. If acceptance is uncertain, inspect the existing task before starting another.
+
+Optional: `compute_consult(question, request_id)` starts a read-only `gpt-5.6-sol` consultation; retrieve its result with `workflow_status(workflow_id)`. This requires an installed, signed-in Codex CLI. The worker reads the repository skill automatically.
+
+## Use the CLI
+
+The CLI can share the same task records as MCP. Replace `TASK_ID` with the ID returned by launch:
+
 ```bash
-determined-batch kill <id>
+export DETERMINED_COMPUTE_PROFILE="$PWD/.local/profile.yaml"
+export DETERMINED_COMPUTE_DB="$PWD/.local/tasks.sqlite3"
+export DETERMINED_COMPUTE_OWNER="$USER"
+export DETERMINED_BATCH_SECRETS="$PWD/.local/credentials.env"
+export DET_VERIFY_SSL=true
+
+determined-compute plan --request-file .local/request.json
+determined-compute launch --request-file .local/request.json --request-id my-job-001
+determined-compute status TASK_ID
+determined-compute logs TASK_ID
 ```
 
-## Authentication and master
-Set the Determined master address via `DET_MASTER` (e.g. `http://det.example:8080`).
-Provide an API token with `DET_API_TOKEN` or pass `--api-token` on the CLI.
-If you prefer username/password login, place `DET_USERNAME` and `DET_PASSWORD`
-in a secrets file (default: `.determined_batch.env` in the working directory)
-and point to it with `--secrets-file` or `DETERMINED_BATCH_SECRETS`.
-
-## CLI usage
-```bash
-# Submit a single config
-DETERMINED_BATCH_SECRETS=~/.det-secrets \
-DET_MASTER=http://det.example:8080 \
-determined-batch submit --config cfg/examples/basic_experiment.yaml \
-  --project-root /path/to/your/code
-
-# Submit every YAML in a directory (optionally in parallel)
-determined-batch submit-dir --config-dir cfg/examples --parallel 4 --delay 0.5
-
-# List resource pools and their free slots
-determined-batch list-pools --available-only --min-free-slots 1
-
-# List experiments
-determined-batch experiments --state COMPLETED --limit 20
-```
-
-## Library usage
-```python
-from pathlib import Path
-from determined_batch.submission import submit_directory
-
-results = submit_directory(Path("cfg/examples"), project_root=Path("/path/to/code"))
-for result in results:
-    print(result)
-```
-
-## Project layout
-- `src/determined_batch`: installable package (API client, services, CLI, submission helpers).
-- `cfg/examples`: starter Determined configs; copy and customise for your workloads.
-- `scripts/examples`: small, non-packaged helper scripts.
-- `upstream`: Determined upstream sources as references.
+See [request examples](cfg/examples), the [service reference](docs/compute-service.md), or `determined-compute --help`.

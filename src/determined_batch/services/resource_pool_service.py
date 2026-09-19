@@ -19,21 +19,15 @@ class ResourcePoolService:
     # ------------------------------------------------------------------
     def get_all_slots(self, force_refresh: bool = False) -> List[Slot]:
         if self._slots_cache is None or force_refresh:
-            try:
-                slots_data = self.api_client.get_slots()
-                self._slots_cache = [Slot.from_api_data(slot) for slot in slots_data]
-            except Exception:
-                return []
+            slots_data = self.api_client.get_slots()
+            self._slots_cache = [Slot.from_api_data(slot) for slot in slots_data]
         return self._slots_cache
 
     def get_all_pools(self, force_refresh: bool = False) -> List[ResourcePool]:
         if self._pools_cache is None or force_refresh:
-            try:
-                pools_data = self.api_client.get_resource_pools()
-                slots = self.get_all_slots(force_refresh=force_refresh)
-                self._pools_cache = [ResourcePool.from_api_data(pool, slots=slots) for pool in pools_data]
-            except Exception:
-                return []
+            pools_data = self.api_client.get_resource_pools()
+            slots = self.get_all_slots(force_refresh=force_refresh)
+            self._pools_cache = [ResourcePool.from_api_data(pool, slots=slots) for pool in pools_data]
         return self._pools_cache
 
     # ------------------------------------------------------------------
@@ -47,7 +41,10 @@ class ResourcePoolService:
         max_pools: Optional[int] = None,
     ) -> List[ResourcePool]:
         avoid_pools = avoid_pools or set()
-        pools = [p for p in self.get_all_pools() if p.name not in avoid_pools and p.available_slots >= min_free_slots]
+        pools = [
+            p for p in self.get_all_pools()
+            if p.name not in avoid_pools and p.capacity_known and p.available_slots >= min_free_slots
+        ]
 
         def sort_key(pool: ResourcePool) -> tuple:
             preference = len(prefer_pools) if prefer_pools else 0
@@ -78,8 +75,8 @@ class ResourcePoolService:
     # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
-    def get_pool_stats(self) -> Dict[str, Dict[str, float]]:
-        stats: Dict[str, Dict[str, float]] = {}
+    def get_pool_stats(self) -> Dict[str, Dict[str, object]]:
+        stats: Dict[str, Dict[str, object]] = {}
         for pool in self.get_all_pools():
             stats[pool.name] = pool.to_dict()
         return stats

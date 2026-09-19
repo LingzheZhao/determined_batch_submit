@@ -1,0 +1,28 @@
+{
+  "kind": "experiment",
+  "overnight": true,
+  "command": [
+    "bash",
+    "-lc",
+    "python train.py --config configs/train.yaml --output \"$COMPUTE_OUTPUT_DIR/train\""
+  ],
+  "workdir": "/run/determined/workdir/home/compute/runs/example/0123456789abcdef/repo",
+  "output_dir": "/run/determined/workdir/home/compute/runs/example/0123456789abcdef/results",
+  "slots": 1,
+  "code_revision": "0123456789abcdef",
+  "experiment_config": {
+    "name": "example-train-01234567",
+    "searcher": {
+      "name": "single",
+      "metric": "validation_loss",
+      "smaller_is_better": true,
+      "max_length": {
+        "batches": 1000
+      }
+    },
+    "checkpoint_storage": {
+      "type": "shared_fs",
+      "host_path": "/workspace/REPLACE_WITH_USER/compute/runs/example/0123456789abcdef/checkpoints"
+    }
+  }
+}

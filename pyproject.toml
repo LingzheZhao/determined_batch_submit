@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "determined-batch"
-version = "0.2.0"
+version = "0.3.0"
 description = "Batch submission helpers for Determined AI clusters"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {file = "LICENSE"}
+requires-python = ">=3.10"
+license = {text = "MIT"}
 authors = [
     {name = "lzzhao"},
 ]
@@ -18,8 +18,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
 ]
@@ -30,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = [
+    "mcp>=2,<3",
+]
 dev = [
     "pytest>=7.0",
     "black>=23.0",
@@ -38,6 +39,8 @@ dev = [
 
 [project.scripts]
 determined-batch = "determined_batch.cli:main"
+determined-compute = "determined_batch.compute_cli:main"
+determined-compute-mcp = "determined_batch.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -48,7 +51,7 @@ where = ["src"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
+target-version = ['py310', 'py311']
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

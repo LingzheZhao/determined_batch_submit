@@ -7,4 +7,7 @@ dist/
 .eggs/
 .pytest_cache/
 .mypy_cache/
+.venv/
+.local/
+.determined_batch.env
 .DS_Store

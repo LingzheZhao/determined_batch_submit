@@ -22,7 +22,8 @@ class ExperimentState(str, Enum):
     ERROR = "ERROR"
     DELETED = "DELETED"
     DELETE_FAILED = "DELETE_FAILED"
-    QUEUE = "QUEUE"
+    QUEUED = "QUEUED"
+    QUEUE = "QUEUED"  # Backward-compatible alias.
     PULLING = "PULLING"
     STARTING = "STARTING"
     RUNNING = "RUNNING"
@@ -106,7 +107,7 @@ class Experiment:
             ExperimentState.RUNNING,
             ExperimentState.STARTING,
             ExperimentState.PULLING,
-            ExperimentState.QUEUE,
+            ExperimentState.QUEUED,
         }
 
 
