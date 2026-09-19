@@ -1,7 +1,7 @@
 """Helpers for loading Determined credentials from a simple ``KEY=VALUE`` file.
 
-The default location can be overridden via the ``DETERMINED_BATCH_SECRETS``
-environment variable. If it is not set, ``.determined_batch.env`` in the current
+The default location can be overridden via the ``DETERMINED_COMPUTE_SECRETS``
+environment variable. If it is not set, ``.determined_compute.env`` in the current
 working directory is used.
 """
 
@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Dict, Optional
 
-DEFAULT_SECRET_ENV = "DETERMINED_BATCH_SECRETS"
+DEFAULT_SECRET_ENV = "DETERMINED_COMPUTE_SECRETS"
 
 
 def default_secrets_path() -> Path:
@@ -19,7 +19,7 @@ def default_secrets_path() -> Path:
     env_path = os.environ.get(DEFAULT_SECRET_ENV)
     if env_path:
         return Path(env_path).expanduser().resolve()
-    return Path.cwd() / ".determined_batch.env"
+    return Path.cwd() / ".determined_compute.env"
 
 
 def load_secrets(secrets_path: Optional[Path] = None) -> Dict[str, str]:

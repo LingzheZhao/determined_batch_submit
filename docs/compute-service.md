@@ -41,6 +41,8 @@ defaults:
 shell_inactivity_seconds: 7200
 ```
 
+Shared roots can include `/SSD`, `/SSD_home`, `/SSD_datasets`, `/SSD3`, `/SSD3_home`, `/SSD3_datasets`, and `/UNSAFE_SSD4`. Declare each available root in `mounts`; host paths refer to cluster agents and need not exist on the machine running the MCP client. The example profile maps these roots to the same container paths. Remove roots unavailable on your deployment.
+
 Mount mappings are required. Image, pool, and slot values are deployment defaults and can be overridden by a request. `shell_inactivity_seconds` is optional and has no service default. The value is advisory; the service does not enforce shell idle timeouts.
 
 ## Request and mode selection
@@ -119,7 +121,7 @@ For a running shell, use the adapter's sanitized `reconnectCommand`, currently `
 
 ## Failure and recovery rules
 
-Transport, authentication, permission, and response-shape failures are errors, not empty results. Unknown capacity is reported as unknown rather than as zero free slots. Authentication failure never causes local fallback. Task log calls request the newest records from Determined and return them in chronological order; an experiment with no trials returns an empty list.
+Transport, authentication, permission, and response-shape failures are errors, not empty results. Authentication failure never causes local fallback. Task log calls request the newest records from Determined and return them in chronological order; an experiment with no trials returns an empty list.
 
 A network timeout during submission can leave acceptance uncertain. The service records that state and does not automatically resubmit, including after restart. MCP exposes `compute_reconcile(task_id, remote_id)` and the CLI exposes `determined-compute ... reconcile TASK_ID REMOTE_ID`. The core fetches that remote entity and binds it only when its unguessable submission marker matches the local record; a mismatch fails with `identity_mismatch`. Without verified evidence, investigate before any new launch.
 

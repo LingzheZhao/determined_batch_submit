@@ -6,8 +6,8 @@ import json
 import pytest
 import requests
 
-from determined_batch.compute import ComputeProfile, ComputeService, SQLiteTaskStore
-from determined_batch.core.api_client import DeterminedAPIClient
+from determined_compute.compute import ComputeProfile, ComputeService, SQLiteTaskStore
+from determined_compute.core.api_client import DeterminedAPIClient
 
 
 def response(payload, status=200):

@@ -68,7 +68,7 @@ The CLI can share the same task records as MCP. Replace `TASK_ID` with the ID re
 export DETERMINED_COMPUTE_PROFILE="$PWD/.local/profile.yaml"
 export DETERMINED_COMPUTE_DB="$PWD/.local/tasks.sqlite3"
 export DETERMINED_COMPUTE_OWNER="$USER"
-export DETERMINED_BATCH_SECRETS="$PWD/.local/credentials.env"
+export DETERMINED_COMPUTE_SECRETS="$PWD/.local/credentials.env"
 export DET_VERIFY_SSL=true
 
 determined-compute plan --request-file .local/request.json

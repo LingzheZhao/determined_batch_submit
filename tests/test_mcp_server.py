@@ -12,7 +12,7 @@ pytest.importorskip("mcp")
 
 from mcp import Client, StdioServerParameters
 
-from determined_batch.mcp_server import create_server
+from determined_compute.mcp_server import create_server
 
 
 class FakeService:
@@ -183,13 +183,13 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
         encoding="utf-8",
     )
     # Tests may run from a source checkout or an installed wheel.
-    project_root = Path(__file__).resolve().parents[1]
-    source_root = str(project_root / "src")
+    repo_root = Path(__file__).resolve().parents[1]
+    source_root = str(repo_root / "src")
     params = StdioServerParameters(
         command=sys.executable,
         args=[
             "-m",
-            "determined_batch.mcp_server",
+            "determined_compute.mcp_server",
             "--profile",
             str(profile),
             "--db",
@@ -197,7 +197,7 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
             "--owner",
             "alice",
             "--repo-root",
-            str(project_root),
+            str(repo_root),
         ],
         env={"PYTHONPATH": source_root},
         cwd=str(tmp_path),

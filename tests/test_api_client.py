@@ -3,13 +3,12 @@ import json
 import pytest
 import requests
 
-from determined_batch.core.api_client import (
+from determined_compute.core.api_client import (
     APIError,
     DeterminedAPIClient,
     SubmissionUncertainError,
     _normalize_api_url,
 )
-from determined_batch.domain.experiment import Experiment, ExperimentState
 
 
 class Response:
@@ -65,12 +64,6 @@ def test_environment_master_precedes_secret_file(tmp_path, monkeypatch):
     assert resolved.api_url == "https://environment.example"
 
 
-def test_queued_experiment_state_uses_schema_spelling():
-    experiment = Experiment.from_api_data({"id": 1, "state": "STATE_QUEUED"})
-    assert experiment.state is ExperimentState.QUEUED
-    assert experiment.is_active()
-
-
 def test_api_error_fields_and_mutation_uncertainty(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: Response({"message": "no"}, 403))
     with pytest.raises(APIError) as caught:
@@ -97,20 +90,6 @@ def test_transport_read_is_retryable_but_mutation_is_uncertain(monkeypatch):
     monkeypatch.setattr(requests, "post", fail)
     with pytest.raises(SubmissionUncertainError):
         client().launch_task("command", {"entrypoint": ["true"]})
-
-
-def test_validation_transport_failure_is_retryable_not_uncertain(tmp_path, monkeypatch):
-    config = tmp_path / "config.yaml"
-    config.write_text("name: validate\n")
-
-    def fail(*args, **kwargs):
-        raise requests.ReadTimeout("disconnected")
-
-    monkeypatch.setattr(requests, "post", fail)
-    with pytest.raises(APIError) as caught:
-        client().create_experiment(config, validate_only=True)
-    assert not isinstance(caught.value, SubmissionUncertainError)
-    assert caught.value.retryable is True
 
 
 def test_launch_payloads_and_shell_secret_removal(monkeypatch):
@@ -222,13 +201,29 @@ def test_get_experiment_unwrap_and_true_tail(monkeypatch):
     assert responses["/api/v1/trials/17/logs"].closed is True
 
 
-def test_multi_pool_slot_membership(monkeypatch):
-    monkeypatch.setattr(
-        requests,
-        "get",
-        lambda *a, **k: Response(
-            {"agents": [{"id": "a", "resourcePools": ["p1", "p2"], "slots": {"0": {"id": "0"}}}]}
-        ),
-    )
-    slots = client().get_slots()
-    assert [(slot["slot_id"], slot["resource_pool"]) for slot in slots] == [("0", "p1"), ("0", "p2")]
+def test_experiment_launch_sends_only_yaml_config_and_activation(monkeypatch):
+    import yaml
+    calls = []
+    def post(url, **kwargs):
+        calls.append((url, kwargs['json']))
+        return Response({'experiment': {'id': 12}})
+    monkeypatch.setattr(requests, 'post', post)
+    config = {'name': 'example', 'entrypoint': 'python train.py',
+              'bind_mounts': [{'host_path': '/SSD', 'container_path': '/SSD'}]}
+    assert client().launch_task('experiment', config)['id'] == 12
+    url, payload = calls[0]
+    assert url.endswith('/api/v1/experiments')
+    assert set(payload) == {'config', 'activate'}
+    assert payload['activate'] is True
+    assert yaml.safe_load(payload['config']) == config
+
+
+def test_shell_cancel_unwraps_response_and_removes_private_key(monkeypatch):
+    monkeypatch.setattr(requests, 'post', lambda *a, **kw: Response({
+        'shell': {'id': 's1', 'state': 'STATE_TERMINATED', 'privateKey': 'fixture-secret'},
+    }))
+    result = client().cancel_task('shell', 's1')
+    assert result['id'] == 's1'
+    assert result['state'] == 'STATE_TERMINATED'
+    assert 'privateKey' not in result
+    assert result['reconnectCommand'] == 'det shell show_ssh_command s1'

@@ -31,6 +31,8 @@ mounts:
     container_path: /run/determined/workdir/home
 ```
 
+Configured shared roots may include `/SSD`, `/SSD_home`, `/SSD_datasets`, `/SSD3`, `/SSD3_home`, `/SSD3_datasets`, and `/UNSAFE_SSD4`. Cluster host paths need not be mounted on the MCP client machine.
+
 Translate paths by replacing the matching host prefix with its container prefix. Do not assume that old image names, pool names, master addresses, or site paths are current; read them from the deployment profile or the user.
 
 For an unattended or durable run, copy or check out the exact revision into a revision-specific directory such as `/workspace/<user>/compute/runs/<project>/<revision>/repo`. Record the revision in the request. Reserve a mutable directory such as `/workspace/<user>/compute/debug/<project>` for interactive shells.
@@ -42,7 +44,7 @@ rsync -a \
   --exclude '.git/' \
   --exclude '.env' \
   --exclude '.env.*' \
-  --exclude '.determined_batch.env' \
+  --exclude '.determined_compute.env' \
   --exclude '.secrets*' \
   --exclude '.ssh/' \
   --exclude '.netrc' \

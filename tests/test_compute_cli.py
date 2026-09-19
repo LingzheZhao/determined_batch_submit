@@ -7,8 +7,8 @@ import time
 
 import pytest
 
-from determined_batch.compute import APIError
-from determined_batch import compute_cli
+from determined_compute.compute import APIError
+from determined_compute import compute_cli
 
 
 class FakeService:

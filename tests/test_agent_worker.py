@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from determined_batch.agent_worker import (
+from determined_compute.agent_worker import (
     WorkflowConflictError,
     WorkflowManager,
     WorkflowNotFoundError,
@@ -360,7 +360,7 @@ def test_module_cli_help_does_not_invoke_codex() -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     result = subprocess.run(
-        [sys.executable, "-m", "determined_batch.agent_worker", "--help"],
+        [sys.executable, "-m", "determined_compute.agent_worker", "--help"],
         cwd=str(REPO_ROOT),
         text=True,
         capture_output=True,

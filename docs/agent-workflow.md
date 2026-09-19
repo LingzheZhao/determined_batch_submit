@@ -31,10 +31,10 @@ both recorded processes are no longer alive. There is no automatic retry loop.
 The Python interface is:
 
 ```python
-from determined_batch.agent_worker import WorkflowManager
+from determined_compute.agent_worker import WorkflowManager
 
 manager = WorkflowManager(
-    db_path="/var/lib/determined-batch/agent-workflows.sqlite3",
+    db_path="/var/lib/determined-compute/agent-workflows.sqlite3",
     repo_root="/path/to/determined-compute-service",
     codex_bin="codex",
     model="gpt-5.6-sol",
@@ -68,8 +68,8 @@ For normal service use, `submit()` starts the worker automatically. A queued or
 interrupted record can also be processed by a supervisor with:
 
 ```bash
-python -m determined_batch.agent_worker worker \
-  --db /var/lib/determined-batch/agent-workflows.sqlite3 \
+python -m determined_compute.agent_worker worker \
+  --db /var/lib/determined-compute/agent-workflows.sqlite3 \
   --repo-root /path/to/determined-compute-service \
   --workflow-id <workflow-id> \
   --codex-bin codex \

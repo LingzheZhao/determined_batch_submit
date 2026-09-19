@@ -11,9 +11,9 @@ from typing import Any, Callable, Optional, Sequence
 
 import yaml
 
-from determined_batch.compute import ComputeError, ComputeProfile, ComputeService, SQLiteTaskStore
-from determined_batch.core.api_client import APIError as ClientAPIError
-from determined_batch.core.api_client import DeterminedAPIClient
+from determined_compute.compute import ComputeError, ComputeProfile, ComputeService, SQLiteTaskStore
+from determined_compute.core.api_client import APIError as ClientAPIError
+from determined_compute.core.api_client import DeterminedAPIClient
 
 
 DEFAULT_DB_PATH = Path("~/.local/state/determined-compute/tasks.sqlite3").expanduser()

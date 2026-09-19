@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import requests
 import yaml
 
-from determined_batch.utils.secrets import load_secrets
+from determined_compute.utils.secrets import load_secrets
 
 ErrorCode = Union[int, str, None]
 
@@ -138,31 +138,13 @@ class DeterminedAPIClient:
         self,
         endpoint: str,
         data: Optional[Dict[str, Any]] = None,
-        files: Optional[Dict[str, Any]] = None,
-        *,
-        mutation: bool = True,
     ) -> Dict[str, Any]:
-        if files:
-            raise ValueError("File uploads are not supported by determined-batch")
         try:
             response = requests.post(self._url(endpoint), headers={**self.headers, "Content-Type": "application/json"}, json=data, timeout=60, verify=self.verify_ssl)
         except requests.RequestException as exc:
-            if mutation:
-                raise SubmissionUncertainError("Determined mutation outcome is unknown", details={"endpoint": endpoint}) from exc
-            raise APIError(
-                "Determined validation request failed",
-                code="transport_error",
-                details={"endpoint": endpoint},
-                retryable=True,
-            ) from exc
-        return self._json_response(response, mutation=mutation)
-
-    def _delete(self, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        try:
-            response = requests.delete(self._url(endpoint), headers={**self.headers, "Content-Type": "application/json"}, json=data, timeout=60, verify=self.verify_ssl)
-        except requests.RequestException as exc:
             raise SubmissionUncertainError("Determined mutation outcome is unknown", details={"endpoint": endpoint}) from exc
         return self._json_response(response, mutation=True)
+
 
     def _stream_logs(self, endpoint: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         try:
@@ -349,18 +331,8 @@ class DeterminedAPIClient:
         entity = self._entity(response, kind, mutation=True)
         return self._safe_shell(entity) if kind == "shell" else entity
 
-    # Existing raw API methods.
-    def get_experiments(self, limit: int = 100, offset: int = 0, states: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        params: Dict[str, Any] = {"limit": limit, "offset": offset}
-        if states:
-            params["states"] = states
-        value = self._get("api/v1/experiments", params=params).get("experiments")
-        if not isinstance(value, list):
-            raise APIError("Experiment list response had no experiments array", code="invalid_response")
-        return value
+    # Experiment log retrieval.
 
-    def get_experiment(self, experiment_id: str) -> Dict[str, Any]:
-        return self._get(f"api/v1/experiments/{experiment_id}")
 
     def get_trials(self, experiment_id: str) -> List[Dict[str, Any]]:
         value = self._get(f"api/v1/experiments/{experiment_id}/trials").get("trials")
@@ -372,109 +344,6 @@ class DeterminedAPIClient:
         entries = self._stream_logs(f"api/v1/trials/{trial_id}/logs", {"limit": limit, "follow": False, "orderBy": "ORDER_BY_DESC"})
         entries.reverse()
         return entries
-
-    def get_experiment_logs(self, experiment_id: str, tail: int = 100) -> Optional[str]:
-        entries = self.task_logs("experiment", experiment_id, tail=tail)
-        messages = [str(item.get("message") or item.get("log")) for item in entries if item.get("message") is not None or item.get("log") is not None]
-        return "\n".join(messages) if messages else None
-
-    def get_resource_pools(self) -> List[Dict[str, Any]]:
-        value = self._get("api/v1/resource-pools").get("resourcePools")
-        if not isinstance(value, list):
-            raise APIError("Resource-pool response had no resourcePools array", code="invalid_response")
-        return value
-
-    def get_slots(self) -> List[Dict[str, Any]]:
-        agents = self._get("api/v1/agents").get("agents")
-        if not isinstance(agents, list):
-            raise APIError("Agent response had no agents array", code="invalid_response")
-        slots: List[Dict[str, Any]] = []
-        for agent in agents:
-            if not isinstance(agent, dict):
-                continue
-            raw_slots = agent.get("slots", {})
-            slot_items = list(raw_slots.values()) if isinstance(raw_slots, dict) else raw_slots
-            if not isinstance(slot_items, list):
-                continue
-            memberships = agent.get("resourcePools")
-            pool_names: List[Optional[str]] = ([memberships] if isinstance(memberships, str) else [str(pool) for pool in memberships]) if memberships else [None]
-            for slot in slot_items:
-                if not isinstance(slot, dict):
-                    continue
-                container = slot.get("container")
-                container_id = container.get("id") if isinstance(container, dict) else container
-                for pool_name in pool_names:
-                    slots.append({"agent_id": agent.get("id"), "agent_label": agent.get("label"), "slot_id": slot.get("id"), "device": slot.get("device"), "enabled": slot.get("enabled", True), "container_id": container_id, "resource_pool": pool_name})
-        return slots
-
-    def get_workspace_id(self, workspace_name: str = "default") -> Optional[int]:
-        value = self._get("api/v1/workspaces", params={"name": workspace_name}).get("workspaces")
-        if not isinstance(value, list):
-            raise APIError("Workspace response had no workspaces array", code="invalid_response")
-        return value[0].get("id") if value else None
-
-    def get_project(self, workspace_name: str, project_name: str) -> Optional[Dict[str, Any]]:
-        workspace_id = self.get_workspace_id(workspace_name)
-        if workspace_id is None:
-            return None
-        value = self._get(f"api/v1/workspaces/{workspace_id}/projects", params={"name": project_name}).get("projects")
-        if not isinstance(value, list):
-            raise APIError("Project response had no projects array", code="invalid_response")
-        return value[0] if value else None
-
-    def create_project(self, workspace_name: str, project_name: str, description: Optional[str] = None) -> Dict[str, Any]:
-        workspace_id = self.get_workspace_id(workspace_name)
-        if workspace_id is None:
-            raise APIError(f"Workspace not found: {workspace_name}", code="not_found")
-        body: Dict[str, Any] = {"name": project_name}
-        if description:
-            body["description"] = description
-        data = self._post(f"api/v1/workspaces/{workspace_id}/projects", data=body)
-        if not isinstance(data.get("project"), dict):
-            raise SubmissionUncertainError("Project creation response had no project", details=data)
-        return data["project"]
-
-    def ensure_project_exists(self, workspace_name: str, project_name: str, description: Optional[str] = None) -> bool:
-        if not self.get_project(workspace_name, project_name):
-            self.create_project(workspace_name, project_name, description)
-        return True
-
-    def create_experiment(self, config_path: Path, project_root: Optional[Path] = None, model_definition: Optional[List[Dict[str, Any]]] = None, activate: bool = True, validate_only: bool = False) -> Dict[str, Any]:
-        if project_root is not None:
-            raise ValueError("project_root uploads are not supported; config must reference remote code")
-        if model_definition:
-            raise ValueError("model_definition uploads are not supported; config must reference remote code")
-        return self._post(
-            "api/v1/experiments",
-            data={
-                "config": Path(config_path).read_text(encoding="utf-8"),
-                "activate": activate,
-                "validateOnly": validate_only,
-            },
-            mutation=not validate_only,
-        )
-
-    def delete_experiment(self, experiment_id: int) -> None:
-        self._delete(f"api/v1/experiments/{experiment_id}")
-
-    def kill_experiment(self, experiment_id: int) -> None:
-        self._post(f"api/v1/experiments/{experiment_id}/kill", data={})
-
-    def cancel_experiment(self, experiment_id: int) -> None:
-        self._post(f"api/v1/experiments/{experiment_id}/cancel", data={})
-
-    def delete_experiments(self, experiment_ids: List[int], project_id: Optional[int] = None) -> Dict[str, Any]:
-        if project_id is not None:
-            return self._delete(f"api/v1/projects/{project_id}/experiments/delete", data={"experimentIds": experiment_ids})
-        results = []
-        for experiment_id in experiment_ids:
-            try:
-                self.delete_experiment(experiment_id)
-            except APIError as exc:
-                results.append({"id": experiment_id, "error": str(exc)})
-            else:
-                results.append({"id": experiment_id, "error": None})
-        return {"results": results}
 
 
 __all__ = ["APIError", "SubmissionUncertainError", "DeterminedAPIClient"]

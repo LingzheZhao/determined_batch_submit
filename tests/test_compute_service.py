@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from determined_batch.compute import (
+from determined_compute.compute import (
     ComputeProfile,
     ComputeService,
     ConflictError,

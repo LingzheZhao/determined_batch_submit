@@ -6,6 +6,22 @@ mounts:
   - host_path: "/workspace/REPLACE_WITH_USER"
     container_path: "/run/determined/workdir/home"
 
+  # Keep the shared roots available on your cluster agents.
+  - host_path: "/SSD"
+    container_path: "/SSD"
+  - host_path: "/SSD_home"
+    container_path: "/SSD_home"
+  - host_path: "/SSD_datasets"
+    container_path: "/SSD_datasets"
+  - host_path: "/SSD3"
+    container_path: "/SSD3"
+  - host_path: "/SSD3_home"
+    container_path: "/SSD3_home"
+  - host_path: "/SSD3_datasets"
+    container_path: "/SSD3_datasets"
+  - host_path: "/UNSAFE_SSD4"
+    container_path: "/UNSAFE_SSD4"
+
 defaults:
   image: "REPLACE_WITH_VERIFIED_IMAGE"
   pool: "REPLACE_WITH_VERIFIED_POOL"

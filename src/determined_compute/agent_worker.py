@@ -1,7 +1,7 @@
 """Durable, read-only Codex consultation workflows.
 
 The MCP server submits work here and immediately returns a workflow id.  Each
-request is executed by a detached ``python -m determined_batch.agent_worker``
+request is executed by a detached ``python -m determined_compute.agent_worker``
 process so the work does not depend on the lifetime of an MCP connection.
 """
 
@@ -447,7 +447,7 @@ class WorkflowManager:
         command = [
             self.python_executable,
             "-m",
-            "determined_batch.agent_worker",
+            "determined_compute.agent_worker",
             "worker",
             "--db",
             str(self.db_path),

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from determined_batch.compute_cli import normalize_owner
+from determined_compute.compute_cli import normalize_owner
 
 
 @pytest.mark.parametrize('value', ['', '   ', 'x' * 257, '中' * 86])
@@ -14,7 +14,7 @@ def test_invalid_owner_is_rejected(value):
 def test_mcp_uses_one_normalized_owner_for_tasks_and_consultations():
     pytest.importorskip('mcp')
     from mcp import Client
-    from determined_batch.mcp_server import create_server
+    from determined_compute.mcp_server import create_server
 
     class Service:
         def list_tasks(self, owner):
@@ -44,7 +44,7 @@ def test_mcp_uses_one_normalized_owner_for_tasks_and_consultations():
 
 
 def test_mcp_rejects_memory_database_before_creating_workflow_files(tmp_path, monkeypatch):
-    from determined_batch.mcp_server import _runtime, build_parser
+    from determined_compute.mcp_server import _runtime, build_parser
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args([
         '--profile', 'unused.yaml', '--owner', 'alice', '--db', ':memory:',
@@ -55,7 +55,7 @@ def test_mcp_rejects_memory_database_before_creating_workflow_files(tmp_path, mo
 
 
 def test_stateful_cli_rejects_memory_database(tmp_path):
-    from determined_batch.compute_cli import _resolve_runtime, build_parser
+    from determined_compute.compute_cli import _resolve_runtime, build_parser
     profile = tmp_path / 'profile.yaml'
     profile.write_text('mounts:\n- host_path: /shared\n  container_path: /shared\n'
                        'defaults:\n  image: example\n  pool: example\n')

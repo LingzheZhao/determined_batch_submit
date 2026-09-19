@@ -9,5 +9,5 @@ dist/
 .mypy_cache/
 .venv/
 .local/
-.determined_batch.env
+.determined_compute.env
 .DS_Store

@@ -14,10 +14,10 @@ import os
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from determined_batch.compute import ComputeError, ComputeProfile, ComputeService, SQLiteTaskStore
-from determined_batch.compute_cli import DEFAULT_DB_PATH, _LazyClient, normalize_owner
-from determined_batch.core.api_client import APIError as ClientAPIError
-from determined_batch.core.api_client import DeterminedAPIClient
+from determined_compute.compute import ComputeError, ComputeProfile, ComputeService, SQLiteTaskStore
+from determined_compute.compute_cli import DEFAULT_DB_PATH, _LazyClient, normalize_owner
+from determined_compute.core.api_client import APIError as ClientAPIError
+from determined_compute.core.api_client import DeterminedAPIClient
 
 
 def _tool_error(exc: BaseException) -> dict[str, Any]:
@@ -50,7 +50,7 @@ def create_server(
         from mcp.types import ToolAnnotations
     except ImportError as exc:  # pragma: no cover - exercised without the optional extra
         raise RuntimeError(
-            "MCP support is not installed; install determined-batch[mcp]"
+            "MCP support is not installed; install determined-compute[mcp]"
         ) from exc
 
     server = MCPServer("determined-compute")
@@ -219,7 +219,7 @@ def _runtime(args: argparse.Namespace) -> tuple[Any, str]:
     service = ComputeService(_LazyClient(make_client), store, profile)
 
     try:
-        from determined_batch.agent_worker import WorkflowManager
+        from determined_compute.agent_worker import WorkflowManager
     except ImportError:
         workflow_manager = None
     else:

@@ -68,7 +68,7 @@ CLI 可以与 MCP 共用任务记录。将 `TASK_ID` 替换为提交时返回的
 export DETERMINED_COMPUTE_PROFILE="$PWD/.local/profile.yaml"
 export DETERMINED_COMPUTE_DB="$PWD/.local/tasks.sqlite3"
 export DETERMINED_COMPUTE_OWNER="$USER"
-export DETERMINED_BATCH_SECRETS="$PWD/.local/credentials.env"
+export DETERMINED_COMPUTE_SECRETS="$PWD/.local/credentials.env"
 export DET_VERIFY_SSL=true
 
 determined-compute plan --request-file .local/request.json

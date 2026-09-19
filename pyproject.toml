@@ -3,16 +3,16 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "determined-batch"
-version = "0.3.0"
-description = "Batch submission helpers for Determined AI clusters"
+name = "determined-compute"
+version = "0.4.0"
+description = "Persistent shared-storage compute service and MCP tools for Determined"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "lzzhao"},
 ]
-keywords = ["determined", "batch", "experiments", "mlops"]
+keywords = ["determined", "mcp", "compute", "mlops"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -38,9 +38,8 @@ dev = [
 ]
 
 [project.scripts]
-determined-batch = "determined_batch.cli:main"
-determined-compute = "determined_batch.compute_cli:main"
-determined-compute-mcp = "determined_batch.mcp_server:main"
+determined-compute = "determined_compute.compute_cli:main"
+determined-compute-mcp = "determined_compute.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

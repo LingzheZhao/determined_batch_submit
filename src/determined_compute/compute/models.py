@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
 
-from determined_batch.core.api_client import APIError, SubmissionUncertainError
+from determined_compute.core.api_client import APIError, SubmissionUncertainError
 
 ComputeError = APIError
 
