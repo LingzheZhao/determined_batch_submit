@@ -9,8 +9,8 @@
 需要 Python 3.10+，以及可访问的 Determined 集群和共享存储。
 
 ```bash
-git clone https://github.com/LingzheZhao/determined_batch_submit.git
-cd determined_batch_submit
+git clone https://github.com/WU-CVGL/determined_cluster_mcp.git
+cd determined_cluster_mcp
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[mcp]'
