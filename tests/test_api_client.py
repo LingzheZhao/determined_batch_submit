@@ -350,3 +350,234 @@ def test_shell_cancel_unwraps_response_and_removes_private_key(monkeypatch):
     assert result['state'] == 'STATE_TERMINATED'
     assert 'privateKey' not in result
     assert result['reconnectCommand'] == 'det shell show_ssh_command s1'
+
+
+def test_get_current_user_normalizes_positive_id_and_returns_only_identity(monkeypatch):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        return Response(
+            {
+                "user": {
+                    "id": "0007",
+                    "username": " alice ",
+                    "password": "must-not-leak",
+                    "admin": True,
+                }
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", get)
+    assert client().get_current_user() == {"id": "7", "username": "alice"}
+    assert calls == [("http://master:8080/api/v1/me", None)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"user": None},
+        {"user": {"id": 0, "username": "alice"}},
+        {"user": {"id": True, "username": "alice"}},
+        {"user": {"id": " 7", "username": "alice"}},
+        {"user": {"id": 7, "username": ""}},
+        {"user": {"id": 7, "username": 8}},
+    ],
+)
+def test_get_current_user_rejects_malformed_response_without_echo(monkeypatch, payload):
+    payload["raw_secret"] = "do-not-echo"
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Response(payload))
+    with pytest.raises(APIError) as caught:
+        client().get_current_user()
+    assert caught.value.code == "invalid_response"
+    assert "do-not-echo" not in str(caught.value)
+    assert caught.value.details is None
+
+
+def test_get_cluster_id_uses_root_info_cluster_id(monkeypatch):
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append(url)
+        return Response({"cluster_id": " cluster-123 ", "master_id": "wrong-value"})
+
+    monkeypatch.setattr(requests, "get", get)
+    assert client().get_cluster_id() == "cluster-123"
+    assert calls == ["http://master:8080/info"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"master_id": "not-the-cluster-id"},
+        {"cluster_id": ""},
+        {"cluster_id": 123},
+        {"cluster_id": "x" * 257},
+    ],
+)
+def test_get_cluster_id_rejects_malformed_response(monkeypatch, payload):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Response(payload))
+    with pytest.raises(APIError) as caught:
+        client().get_cluster_id()
+    assert caught.value.code == "invalid_response"
+    assert caught.value.details is None
+
+
+@pytest.mark.parametrize("kind", ["command", "shell", "experiment"])
+def test_list_remote_tasks_filters_pages_and_redacts(kind, monkeypatch):
+    calls = []
+    collection_key = f"{kind}s"
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs.get("params")))
+        return Response(
+            {
+                collection_key: [
+                    {
+                        "id": 19,
+                        "userId": "7",
+                        "username": "alice",
+                        "name": "native-name",
+                        "displayName": "display",
+                        "description": "safe description",
+                        "state": "STATE_RUNNING",
+                        "resourcePool": "gpu",
+                        "startTime": "2026-09-20T00:00:00Z",
+                        "endTime": None,
+                        "config": {"environment": {"TOKEN": "secret"}},
+                        "originalConfig": "secret config",
+                        "privateKey": "secret key",
+                        "environment": {"PASSWORD": "secret"},
+                        "hyperparameters": {"secret": "value"},
+                    },
+                    {"id": "native-string-id", "state": "STATE_COMPLETED"},
+                ],
+                "pagination": {
+                    "limit": 25,
+                    "offset": 5,
+                    "startIndex": 5,
+                    "endIndex": 7,
+                    "total": 42,
+                    "ignored": "value",
+                },
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", get)
+    result = client().list_remote_tasks(kind, user_id="007", limit=25, offset=5)
+
+    assert calls == [
+        (
+            f"http://master:8080/api/v1/{kind}s",
+            {
+                "userIds": [7],
+                "limit": 25,
+                "offset": 5,
+                "orderBy": "ORDER_BY_DESC",
+                "sortBy": "SORT_BY_START_TIME",
+            },
+        )
+    ]
+    assert result["pagination"] == {
+        "limit": 25,
+        "offset": 5,
+        "startIndex": 5,
+        "endIndex": 7,
+        "total": 42,
+    }
+    assert result["tasks"][0] == {
+        "id": 19,
+        "userId": "7",
+        "username": "alice",
+        "name": "native-name",
+        "displayName": "display",
+        "description": "safe description",
+        "state": "STATE_RUNNING",
+        "resourcePool": "gpu",
+        "startTime": "2026-09-20T00:00:00Z",
+        "endTime": None,
+    }
+    assert result["tasks"][1] == {
+        "id": "native-string-id",
+        "state": "STATE_COMPLETED",
+    }
+    encoded = json.dumps(result)
+    for forbidden in ("config", "privateKey", "environment", "hyperparameters", "secret"):
+        assert forbidden not in encoded
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"kind": "commands", "user_id": "7"}, "kind must be"),
+        ({"kind": "command", "user_id": "0"}, "positive numeric"),
+        ({"kind": "command", "user_id": "7", "limit": 0}, "between 1 and 100"),
+        ({"kind": "command", "user_id": "7", "limit": True}, "between 1 and 100"),
+        ({"kind": "command", "user_id": "7", "offset": -1}, "non-negative"),
+        ({"kind": "command", "user_id": "7", "offset": False}, "non-negative"),
+    ],
+)
+def test_list_remote_tasks_validates_inputs(kwargs, message):
+    kind = kwargs.pop("kind")
+    with pytest.raises(ValueError, match=message):
+        client().list_remote_tasks(kind, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"commands": {}, "pagination": {}},
+        {"commands": ["not-an-object"], "pagination": {}},
+        {
+            "commands": [{"id": "task", "description": {"privateKey": "secret"}}],
+            "pagination": {
+                "limit": 50,
+                "offset": 0,
+                "startIndex": 0,
+                "endIndex": 1,
+                "total": 1,
+            },
+        },
+        {"commands": [], "pagination": None},
+        {
+            "commands": [],
+            "pagination": {
+                "limit": 50,
+                "offset": 0,
+                "startIndex": 0,
+                "endIndex": 0,
+            },
+        },
+        {
+            "commands": [],
+            "pagination": {
+                "limit": True,
+                "offset": 0,
+                "startIndex": 0,
+                "endIndex": 0,
+                "total": 0,
+            },
+        },
+    ],
+)
+def test_list_remote_tasks_rejects_malformed_pages_without_echo(monkeypatch, payload):
+    payload["raw_secret"] = "do-not-echo"
+    monkeypatch.setattr(requests, "get", lambda *a, **k: Response(payload))
+    with pytest.raises(APIError) as caught:
+        client().list_remote_tasks("command", user_id="7")
+    assert caught.value.code == "invalid_response"
+    assert "do-not-echo" not in str(caught.value)
+    assert caught.value.details is None
+
+
+def test_remote_discovery_does_not_swallow_authentication_error(monkeypatch):
+    monkeypatch.setattr(
+        requests,
+        "get",
+        lambda *a, **k: Response({"message": "denied"}, status=401),
+    )
+    with pytest.raises(APIError) as caught:
+        client().list_remote_tasks("command", user_id="7")
+    assert caught.value.code == 401
+    assert caught.value.retryable is False

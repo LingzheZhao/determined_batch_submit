@@ -62,6 +62,8 @@ Use absolute paths. Sessions with the same database and owner share task records
 
 Launches check current capacity and avoid queuing by default; set `allow_queue: true` only when queuing is intended. Reuse the same `request_id` when retrying the same launch. If acceptance is uncertain, inspect the existing task before starting another.
 
+To manage a task created through the WebUI, native CLI, or another device under the same Determined account, call `compute_discover(kind, limit=50, offset=0)`, then `compute_adopt(kind, remote_id)`. Discovery is read-only and does not register or submit anything. Adoption verifies the current cluster and account, returns a local `task_id`, and never relaunches the remote task. Use that local ID with the existing status, logs, and cancel tools.
+
 The client can plan directly with these tools. Server-side consultation is disabled by default. To add the optional Codex backend and choose its model, see [consultation setup](docs/agent-workflow.md); it is separate from the client's model choice.
 
 ## Use the CLI
@@ -79,6 +81,9 @@ determined-compute plan --request-file .local/request.json
 determined-compute launch --request-file .local/request.json --request-id my-job-001
 determined-compute status TASK_ID
 determined-compute logs TASK_ID
+
+determined-compute discover command --limit 20 --offset 0
+determined-compute adopt command REMOTE_ID
 ```
 
 See [request examples](cfg/examples), the [service reference](docs/compute-service.md), or `determined-compute --help`.

@@ -19,7 +19,7 @@ flowchart LR
     H[mapped shared storage] <--> K
 ```
 
-`ComputeService` is the source of truth for task planning, idempotent launch, ownership checks, status, logs, cancellation, and conservative reconciliation. Its local `task_id` is stable across service restarts and is separate from any Determined `remote_id`. The SQLite file belongs on local durable storage; code, data, packages, checkpoints, logs, and outputs belong on mapped shared storage.
+`ComputeService` is the source of truth for task planning, idempotent launch, discovery/adoption, ownership checks, status, logs, cancellation, and conservative reconciliation. Its local `task_id` is stable across service restarts and is separate from any Determined `remote_id`. The SQLite file belongs on local durable storage; code, data, packages, checkpoints, logs, and outputs belong on mapped shared storage.
 
 The MCP server is a local stdio service for one trusted user. It binds `owner` when the process starts, so tools cannot claim another namespace. Separate sessions can use separate owner names against one database; deliberate collaboration can share a name. This boundary helps organize tasks but does not provide multi-user security. An exposed or remote service needs a separate transport and authentication design.
 
@@ -110,6 +110,8 @@ determined-compute-mcp \
 
 Equivalent environment variables are `DETERMINED_COMPUTE_PROFILE`, `DETERMINED_COMPUTE_DB`, `DETERMINED_COMPUTE_OWNER`, and `DETERMINED_COMPUTE_REPO_ROOT`. The profile and database paths remain required in practice; keep credentials in the established Determined provider rather than these files.
 
+After upgrading the service, restart every MCP process that shares the SQLite database so each process loads the new tools and additive database schema.
+
 The tools are:
 
 | Tool | Arguments | Result |
@@ -124,6 +126,8 @@ The tools are:
 | `compute_logs` | `task_id`, optional `tail=200` | Core log result |
 | `compute_cancel` | `task_id` | Updated task object |
 | `compute_reconcile` | `task_id`, `remote_id` | Safely bind a verified uncertain submission |
+| `compute_discover` | `kind`, optional `limit=50`, `offset=0` | List current-account remote tasks without registering them |
+| `compute_adopt` | `kind`, `remote_id` | Register an existing current-account remote task locally |
 | `compute_list_tasks` | none | Tasks in the startup-bound owner namespace |
 | `compute_consult` (optional) | `question`, `request_id`, optional `context` | Persisted workflow object |
 | `workflow_status` (optional) | `workflow_id` | Current persisted workflow object |
@@ -137,6 +141,30 @@ name. Top-level `name` and `description` override experiment-native metadata whe
 The owner is never a tool argument. On failure, MCP raises a tool error (`isError: true`) whose compact JSON content has the shape `{"error":{"code":"...","message":"...","retryable":false,"details":{...}}}`; `retryable` and `details` appear when available, and `structured_content` is null. Uncertain submission errors include their local task ID in details. Plan first, review resolved paths and advisories, and then launch with a stable request ID. Reusing that ID with identical content returns the established record; conflicting content is rejected.
 
 For a running shell, use the adapter's sanitized `reconnectCommand`, currently `det shell show_ssh_command <remote-id>`. The adapter removes `privateKey` from returned shell entities; do not copy private key material into task records, MCP context, or reports.
+
+## Discover and adopt existing remote tasks
+
+`compute_discover(kind, limit=50, offset=0)` performs a read-only, paginated query for tasks owned by the currently authenticated Determined account. `kind` is required and must be `command`, `shell`, or `experiment`; `limit` must be 1–100. Discovery neither writes a local task record nor submits a remote task.
+
+Use discovery for tasks created through the Determined WebUI, native CLI, or another device using the same account. The CLI equivalent is:
+
+```bash
+determined-compute ... discover command --limit 20 --offset 0
+```
+
+`compute_adopt(kind, remote_id)` registers one discovered remote task in the startup-bound owner namespace. Before writing, the service reads the current `/me` user ID and `/info` cluster ID, fetches the remote task, and requires its `userId` to match the current account. An administrator cannot use adoption to claim another user's task. Remote authorization for later status, logs, and cancellation remains the authorization of the configured Determined account.
+
+A newly adopted local record exposes `origin: "adopted"` and stores only safe identity/status metadata, including the available name and description. It does not persist raw remote configuration or credentials. If `workdir`, `output_dir`, or `code_revision` cannot be established safely, those fields remain empty rather than being inferred. Adoption grants no additional shared-storage access.
+
+Adoption is keyed by local owner, actual cluster ID, task kind, and remote ID. Repeating the same adoption returns the existing local `task_id`. A different local SQLite database registers the task independently; keep databases on local durable disk rather than shared NFS. Adopted records bind to the actual cluster and account identity, not to the launch profile. Existing locally launched records retain their original profile binding.
+
+After adoption, use the returned local ID with `compute_status`, `compute_logs`, or `compute_cancel`. Adoption does not accept an old `request_id` and never launches the remote task again. Its CLI equivalent is:
+
+```bash
+determined-compute ... adopt command REMOTE_ID
+```
+
+`compute_reconcile` is not an adoption shortcut. Reconciliation repairs an existing local submission whose remote acceptance was uncertain and requires its submission marker to match. If an uncertain local submission already exists, use its local `task_id` with `compute_reconcile` instead of registering the remote task again. Use `compute_adopt` for an independently created remote task.
 
 ## Failure and recovery rules
 

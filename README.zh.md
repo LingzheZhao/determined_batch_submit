@@ -62,6 +62,8 @@ DET_API_TOKEN=your-api-token
 
 提交前默认检查可用容量并避免排队；确实需要排队时显式设置 `allow_queue: true`。重试同一次提交时复用原 `request_id`。如果无法确定是否提交成功，先检查已有任务，再决定后续操作。
 
+如需管理同一 Determined 账户通过 WebUI、原生 CLI 或另一台设备创建的任务，先调用 `compute_discover(kind, limit=50, offset=0)`，再调用 `compute_adopt(kind, remote_id)`。发现操作只读，不登记也不提交任务。本地登记操作会核对当前集群和账户，返回本地 `task_id`，且绝不会重新启动远端任务。之后用该本地 ID 调用现有的状态、日志和取消工具。
+
 客户端可以直接用这些工具规划任务。服务端咨询默认关闭；如需启用可选的 Codex 后端并指定其模型，请参阅[咨询配置](docs/agent-workflow.md)。咨询后端的模型与客户端使用的模型分别配置。
 
 ## 使用 CLI
@@ -79,6 +81,9 @@ determined-compute plan --request-file .local/request.json
 determined-compute launch --request-file .local/request.json --request-id my-job-001
 determined-compute status TASK_ID
 determined-compute logs TASK_ID
+
+determined-compute discover command --limit 20 --offset 0
+determined-compute adopt command REMOTE_ID
 ```
 
 更多用法见[请求示例](cfg/examples)、[服务参考](docs/compute-service.md)或 `determined-compute --help`。

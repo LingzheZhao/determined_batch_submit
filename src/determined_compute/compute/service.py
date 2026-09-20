@@ -9,9 +9,12 @@ import posixpath
 import re
 import shlex
 import unicodedata
+import uuid
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 from urllib.parse import urlsplit
+
+from determined_compute.core.api_client import DeterminedAPIClient
 
 from .models import (
     APIError,
@@ -573,6 +576,11 @@ class ComputeService:
         request: Mapping[str, Any],
         plan: Mapping[str, Any],
     ) -> None:
+        if record.origin == "adopted":
+            raise ConflictError(
+                "an adopted task cannot be used as a launch retry",
+                code="idempotency_conflict",
+            )
         if record.payload_hash == payload_hash:
             return
         new_fields = {"name", "description", "allow_queue"}
@@ -639,6 +647,8 @@ class ComputeService:
         if record.remote_id is None:
             return result
         entity = self.client.get_task(record.kind, record.remote_id)
+        if record.origin == "adopted":
+            self._check_adopted_entity(record, entity)
         state = _remote_state(entity)
         if state != record.remote_state:
             record = self.store.update_remote_state(record.task_id, state)
@@ -653,6 +663,10 @@ class ComputeService:
         self._validate_binding(record)
         if record.remote_id is None:
             return []
+        if record.origin == "adopted":
+            self._check_adopted_entity(
+                record, self.client.get_task(record.kind, record.remote_id)
+            )
         result = self.client.task_logs(record.kind, record.remote_id, tail)
         if not isinstance(result, list):
             raise APIError("task log response was not a list", code="invalid_api_response")
@@ -665,6 +679,10 @@ class ComputeService:
             raise ConflictError(
                 "remote task id is unknown; reconcile the submission before cancelling",
                 code="remote_id_unknown",
+            )
+        if record.origin == "adopted":
+            self._check_adopted_entity(
+                record, self.client.get_task(record.kind, record.remote_id)
             )
         entity = self.client.cancel_task(record.kind, record.remote_id)
         state = _remote_state(entity)
@@ -679,11 +697,197 @@ class ComputeService:
         owner = _required_text(owner, "owner")
         return [self._public(record) for record in self.store.list_owned(owner)]
 
+    @staticmethod
+    def _management_kind(kind: Any) -> str:
+        if not isinstance(kind, str) or kind not in {"command", "shell", "experiment"}:
+            raise ValidationError("kind must be command, shell, or experiment")
+        return kind
+
+    @staticmethod
+    def _management_remote_id(kind: str, value: Any) -> str:
+        if kind == "experiment":
+            try:
+                return DeterminedAPIClient.normalize_user_id(value)
+            except ValueError as exc:
+                raise ValidationError("experiment remote_id must be a positive integer") from exc
+        if not isinstance(value, str):
+            raise ValidationError("command and shell remote_id must be a UUID")
+        try:
+            return str(uuid.UUID(value))
+        except ValueError as exc:
+            raise ValidationError("command and shell remote_id must be a UUID") from exc
+
+    def _remote_account(self) -> tuple[str, Dict[str, str]]:
+        cluster_id = self.client.get_cluster_id()
+        user = self.client.get_current_user()
+        if (
+            not isinstance(cluster_id, str)
+            or not cluster_id.strip()
+            or len(cluster_id.encode("utf-8")) > 256
+            or not isinstance(user, Mapping)
+            or not isinstance(user.get("username"), str)
+            or not user["username"].strip()
+        ):
+            raise APIError("Remote cluster or account identity is unavailable", code="invalid_response")
+        try:
+            user_id = DeterminedAPIClient.normalize_user_id(user.get("id"))
+        except ValueError as exc:
+            raise APIError("Remote account identity is unavailable", code="invalid_response") from exc
+        return cluster_id.strip(), {"id": user_id, "username": user["username"].strip()}
+
+    @staticmethod
+    def _check_remote_owner(entity: Any, user_id: str) -> None:
+        if not isinstance(entity, Mapping):
+            raise APIError("Remote task response is malformed", code="invalid_response")
+        try:
+            task_user_id = DeterminedAPIClient.normalize_user_id(entity.get("userId"))
+        except ValueError as exc:
+            raise APIError("Remote task ownership cannot be established", code="ownership_unavailable") from exc
+        if task_user_id != user_id:
+            raise ConflictError(
+                "remote task is not owned by the authenticated account",
+                code="ownership_mismatch",
+            )
+
+    def _check_remote_entity(self, kind: str, remote_id: str, entity: Any, user_id: str) -> None:
+        self._check_remote_owner(entity, user_id)
+        try:
+            actual_id = self._management_remote_id(kind, entity.get("id"))
+        except ValidationError as exc:
+            raise APIError("Remote task identity is malformed", code="invalid_response") from exc
+        if actual_id != remote_id:
+            raise ConflictError("remote task identity does not match", code="identity_mismatch")
+
+    def _check_adopted_entity(self, record: TaskRecord, entity: Any) -> None:
+        self._check_remote_entity(record.kind, record.remote_id, entity, record.remote_user_id)
+
+    @staticmethod
+    def _remote_text(value: Any, limit: int = 4096) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        return text[:limit] if text else None
+
+    @classmethod
+    def _remote_metadata(cls, entity: Mapping[str, Any]) -> Dict[str, Optional[str]]:
+        description = cls._remote_text(entity.get("description"))
+        name = cls._remote_text(entity.get("name"), 256) or cls._remote_text(entity.get("displayName"), 256)
+        if name is None and description:
+            name = description.splitlines()[0][:256]
+        return {"name": name, "description": description}
+
+    def discover(self, kind: str, owner: str, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Read one remote page for the authenticated account without registering tasks."""
+        kind = self._management_kind(kind)
+        owner = _required_text(owner, "owner")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValidationError("limit must be an integer between 1 and 100")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValidationError("offset must be a non-negative integer")
+        cluster_id, user = self._remote_account()
+        page = self.client.list_remote_tasks(kind, user_id=user["id"], limit=limit, offset=offset)
+        if not isinstance(page, Mapping) or not isinstance(page.get("tasks"), list):
+            raise APIError("Remote task page is malformed", code="invalid_response")
+        pagination = page.get("pagination")
+        if (
+            not isinstance(pagination, Mapping)
+            or pagination.get("limit") != limit
+            or pagination.get("offset") != offset
+            or isinstance(pagination.get("total"), bool)
+            or not isinstance(pagination.get("total"), int)
+            or pagination["total"] < 0
+            or (
+                page["tasks"]
+                and pagination["total"] < offset + len(page["tasks"])
+            )
+            or len(page["tasks"]) > limit
+        ):
+            raise APIError("Remote task pagination is malformed", code="invalid_response")
+        tasks = []
+        binding = self._cluster_identity()
+        for entity in page["tasks"]:
+            self._check_remote_owner(entity, user["id"])
+            try:
+                remote_id = self._management_remote_id(kind, entity.get("id"))
+            except ValidationError as exc:
+                raise APIError("Remote task identity is malformed", code="invalid_response") from exc
+            local = self.store.lookup_remote(
+                owner=owner, kind=kind, remote_id=remote_id,
+                cluster_identity=binding, remote_cluster_id=cluster_id,
+            )
+            if (
+                local is not None
+                and local.origin == "adopted"
+                and local.remote_user_id != user["id"]
+            ):
+                local = None
+            tasks.append({
+                "kind": kind,
+                "remote_id": remote_id,
+                **self._remote_metadata(entity),
+                "remote_state": _remote_state(entity),
+                "remote_user_id": user["id"],
+                "remote_username": self._remote_text(entity.get("username"), 256),
+                "resource_pool": self._remote_text(entity.get("resourcePool"), 256),
+                "start_time": self._remote_text(entity.get("startTime"), 128),
+                "local_task_id": local.task_id if local is not None else None,
+            })
+        next_offset = offset + len(tasks)
+        return {
+            "kind": kind,
+            "remote_cluster_id": cluster_id,
+            "account": user,
+            "tasks": tasks,
+            "pagination": {
+                "offset": offset, "limit": limit, "total": pagination["total"],
+                "next_offset": next_offset if tasks and next_offset < pagination["total"] else None,
+            },
+        }
+
+    def adopt(self, kind: str, remote_id: str, owner: str) -> Dict[str, Any]:
+        """Register an existing owned task locally; never submit or edit a remote task."""
+        kind = self._management_kind(kind)
+        remote_id = self._management_remote_id(kind, remote_id)
+        owner = _required_text(owner, "owner")
+        cluster_id, user = self._remote_account()
+        entity = self.client.get_task(kind, remote_id)
+        self._check_remote_entity(kind, remote_id, entity, user["id"])
+        record, _created = self.store.adopt(
+            owner=owner, kind=kind, remote_id=remote_id,
+            remote_state=_remote_state(entity),
+            cluster_identity=self._cluster_identity(),
+            remote_cluster_id=cluster_id, remote_user_id=user["id"],
+            profile_hash=self.profile.fingerprint,
+            submission_marker=(
+                entity.get("submissionMarker")
+                if isinstance(entity.get("submissionMarker"), str)
+                else None
+            ),
+            legacy_submission_markers=tuple(
+                marker
+                for description in self._entity_descriptions(entity)
+                if (
+                    marker := DeterminedAPIClient._valid_submission_marker(
+                        description.splitlines()[0] if description else None
+                    )
+                ) is not None
+            ),
+            **self._remote_metadata(entity),
+        )
+        # A task launched through this owner/database retains its original binding.
+        if record.origin == "submitted":
+            self._validate_binding(record)
+        if record.remote_state != _remote_state(entity):
+            record = self.store.update_remote_state(record.task_id, _remote_state(entity))
+        return self._public(record)
+
     def reconcile(self, task_id: str, owner: str, remote_id: str) -> Dict[str, Any]:
         """Bind an uncertain record only after verifying its unguessable remote marker."""
 
         remote_id = _required_text(remote_id, "remote_id")
         record = self.store.get_owned(task_id, owner)
+        if record.origin == "adopted":
+            raise ConflictError("an adopted task is not a submission to reconcile", code="invalid_operation")
         self._validate_binding(record)
         if record.remote_id is not None:
             if record.remote_id != remote_id:
@@ -760,6 +964,13 @@ class ComputeService:
         )
 
     def _validate_binding(self, record: TaskRecord) -> None:
+        if record.origin == "adopted":
+            cluster_id, user = self._remote_account()
+            if cluster_id != record.remote_cluster_id:
+                raise ConflictError("task belongs to a different remote cluster", code="binding_mismatch")
+            if user["id"] != record.remote_user_id:
+                raise ConflictError("task belongs to a different authenticated account", code="ownership_mismatch")
+            return
         if (
             record.profile_hash != self.profile.fingerprint
             or record.cluster_identity != self._cluster_identity()

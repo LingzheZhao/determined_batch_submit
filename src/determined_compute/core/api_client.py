@@ -85,6 +85,18 @@ def _login_for_token(api_url: str, username: str, password: str, verify_ssl: boo
 
 class DeterminedAPIClient:
     _TASK_KINDS = {"command", "shell", "experiment"}
+    _REMOTE_TASK_FIELDS = (
+        "id",
+        "userId",
+        "username",
+        "name",
+        "displayName",
+        "description",
+        "state",
+        "resourcePool",
+        "startTime",
+        "endTime",
+    )
 
     def __init__(self, api_url: Optional[str] = None, api_token: Optional[str] = None, secrets_path: Optional[Path] = None, verify_ssl: Optional[bool] = None) -> None:
         secrets = load_secrets(secrets_path)
@@ -206,6 +218,102 @@ class DeterminedAPIClient:
         return normalized
 
     @staticmethod
+    def normalize_user_id(value: Any) -> str:
+        """Return a canonical positive numeric Determined user ID."""
+        if isinstance(value, bool):
+            raise ValueError("user_id must be a positive numeric ID")
+        if isinstance(value, int):
+            user_id = value
+        elif isinstance(value, str) and value.isascii() and value.isdigit():
+            user_id = int(value)
+        else:
+            raise ValueError("user_id must be a positive numeric ID")
+        if user_id <= 0:
+            raise ValueError("user_id must be a positive numeric ID")
+        return str(user_id)
+
+    def get_current_user(self) -> Dict[str, str]:
+        response = self._get("api/v1/me")
+        user = response.get("user")
+        if not isinstance(user, Mapping):
+            raise APIError("Current-user response is malformed", code="invalid_response")
+        try:
+            user_id = self.normalize_user_id(user.get("id"))
+        except ValueError as exc:
+            raise APIError("Current-user response is malformed", code="invalid_response") from exc
+        username = user.get("username")
+        if not isinstance(username, str) or not username.strip():
+            raise APIError("Current-user response is malformed", code="invalid_response")
+        return {"id": user_id, "username": username.strip()}
+
+    def get_cluster_id(self) -> str:
+        response = self._get("info")
+        cluster_id = response.get("cluster_id")
+        if not isinstance(cluster_id, str):
+            raise APIError("Cluster-info response is malformed", code="invalid_response")
+        cluster_id = cluster_id.strip()
+        if not cluster_id or len(cluster_id.encode("utf-8")) > 256:
+            raise APIError("Cluster-info response is malformed", code="invalid_response")
+        return cluster_id
+
+    def list_remote_tasks(
+        self,
+        kind: str,
+        *,
+        user_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        if kind not in self._TASK_KINDS:
+            raise ValueError("kind must be one of: command, shell, experiment")
+        normalized_user_id = self.normalize_user_id(user_id)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer between 1 and 100")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        response = self._get(
+            f"api/v1/{kind}s",
+            params={
+                "userIds": [int(normalized_user_id)],
+                "limit": limit,
+                "offset": offset,
+                "orderBy": "ORDER_BY_DESC",
+                "sortBy": "SORT_BY_START_TIME",
+            },
+        )
+        collection = response.get(f"{kind}s")
+        if not isinstance(collection, list):
+            raise APIError("Remote-task response is malformed", code="invalid_response")
+        tasks: List[Dict[str, Any]] = []
+        for item in collection:
+            if not isinstance(item, Mapping):
+                raise APIError("Remote-task response is malformed", code="invalid_response")
+            summary: Dict[str, Any] = {}
+            for key in self._REMOTE_TASK_FIELDS:
+                if key not in item:
+                    continue
+                value = item[key]
+                if key in {"id", "userId"}:
+                    valid = not isinstance(value, bool) and isinstance(value, (int, str))
+                else:
+                    valid = value is None or isinstance(value, str)
+                if not valid:
+                    raise APIError("Remote-task response is malformed", code="invalid_response")
+                summary[key] = value
+            tasks.append(summary)
+        pagination = response.get("pagination")
+        if not isinstance(pagination, Mapping):
+            raise APIError("Remote-task pagination is malformed", code="invalid_response")
+        pagination_fields = ("limit", "offset", "startIndex", "endIndex", "total")
+        normalized_pagination: Dict[str, int] = {}
+        for field in pagination_fields:
+            value = pagination.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise APIError("Remote-task pagination is malformed", code="invalid_response")
+            normalized_pagination[field] = value
+        return {"tasks": tasks, "pagination": normalized_pagination}
+
+    @staticmethod
     def _entity(response: Dict[str, Any], kind: str, *, mutation: bool = False) -> Dict[str, Any]:
         entity = response.get(kind)
         if not isinstance(entity, dict) or entity.get("id") is None:
@@ -227,6 +335,14 @@ class DeterminedAPIClient:
             safe: Dict[str, Any] = {}
             for key, item in value.items():
                 normalized = "".join(char for char in key.lower() if char.isalnum())
+                # Determined experiment entities may carry the submitted YAML in
+                # originalConfig.  A string-valued config is equally opaque to
+                # recursive redaction; get_task adds a parsed, redacted mapping
+                # from the response-level config separately when one is available.
+                if normalized == "originalconfig" or (
+                    normalized == "config" and isinstance(item, str)
+                ):
+                    continue
                 embedded = (
                     "password",
                     "passwd",

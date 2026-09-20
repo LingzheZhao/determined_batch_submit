@@ -43,6 +43,20 @@ class FakeService:
         self.calls.append(("list", owner))
         return [{"task_id": "task-1", "owner": owner}]
 
+    def discover(self, kind, owner, limit=50, offset=0):
+        self.calls.append(("discover", kind, owner, limit, offset))
+        return {
+            "kind": kind,
+            "owner": owner,
+            "limit": limit,
+            "offset": offset,
+            "tasks": [],
+        }
+
+    def adopt(self, kind, remote_id, owner):
+        self.calls.append(("adopt", kind, remote_id, owner))
+        return {"task_id": "adopted-1", "kind": kind, "remote_id": remote_id}
+
 
 def test_plan_outputs_json_and_passes_request(monkeypatch, capsys):
     service = FakeService()
@@ -72,6 +86,29 @@ def test_launch_binds_owner_outside_request(monkeypatch, capsys):
     assert code == 0
     assert service.calls == [("launch", {"command": "true"}, "req-1", "alice")]
     assert json.loads(capsys.readouterr().out)["result"]["task_id"] == "task-1"
+
+
+def test_discover_and_adopt_bind_owner_and_forward_pagination(monkeypatch, capsys):
+    service = FakeService()
+    monkeypatch.setattr(compute_cli, "_resolve_runtime", lambda args: (service, "alice"))
+
+    assert compute_cli.main(["discover", "shell", "--limit", "7", "--offset", "2"]) == 0
+    discovered = json.loads(capsys.readouterr().out)["result"]
+    assert discovered == {
+        "kind": "shell",
+        "owner": "alice",
+        "limit": 7,
+        "offset": 2,
+        "tasks": [],
+    }
+
+    assert compute_cli.main(["adopt", "experiment", "remote-9"]) == 0
+    adopted = json.loads(capsys.readouterr().out)["result"]
+    assert adopted["task_id"] == "adopted-1"
+    assert service.calls == [
+        ("discover", "shell", "alice", 7, 2),
+        ("adopt", "experiment", "remote-9", "alice"),
+    ]
 
 
 def test_plan_accepts_yaml_request_file(tmp_path, monkeypatch, capsys):

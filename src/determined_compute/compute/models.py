@@ -50,13 +50,16 @@ class TaskRecord:
     code_revision: Optional[str]
     name: Optional[str]
     description: Optional[str]
-    workdir: str
-    output_dir: str
+    workdir: Optional[str]
+    output_dir: Optional[str]
     cluster_identity: Optional[str]
     submission_marker: str
     error_code: Optional[str]
     created_at: str
     updated_at: str
+    origin: str = "submitted"
+    remote_user_id: Optional[str] = None
+    remote_cluster_id: Optional[str] = None
 
     def public_dict(self) -> Dict[str, Any]:
         result = asdict(self)

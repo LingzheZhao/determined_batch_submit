@@ -48,6 +48,25 @@ class FakeService:
         self.calls.append(("list", owner))
         return [{"task_id": "task-1", "owner": owner}]
 
+    def discover(self, kind, owner, limit=50, offset=0):
+        self.calls.append(("discover", kind, owner, limit, offset))
+        return {
+            "kind": kind,
+            "owner": owner,
+            "limit": limit,
+            "offset": offset,
+            "tasks": [{"remote_id": "remote-1"}],
+        }
+
+    def adopt(self, kind, remote_id, owner):
+        self.calls.append(("adopt", kind, remote_id, owner))
+        return {
+            "task_id": "adopted-1",
+            "kind": kind,
+            "remote_id": remote_id,
+            "owner": owner,
+        }
+
 
 class FakeWorkflowManager:
     def __init__(self) -> None:
@@ -82,11 +101,26 @@ def test_real_sdk_client_lists_tools_and_invokes_bound_owner():
                 "compute_cancel",
                 "compute_reconcile",
                 "compute_list_tasks",
+                "compute_discover",
+                "compute_adopt",
                 "compute_consult",
                 "workflow_status",
             }
             for tool in tools.values():
                 assert "owner" not in tool.input_schema.get("properties", {})
+            assert set(tools["compute_discover"].input_schema["required"]) == {"kind"}
+            assert tools["compute_discover"].input_schema["properties"]["limit"]["default"] == 50
+            assert tools["compute_discover"].input_schema["properties"]["offset"]["default"] == 0
+            assert set(tools["compute_adopt"].input_schema["required"]) == {
+                "kind",
+                "remote_id",
+            }
+            assert tools["compute_discover"].annotations.read_only_hint is True
+            assert tools["compute_discover"].annotations.open_world_hint is True
+            assert tools["compute_adopt"].annotations.read_only_hint is False
+            assert tools["compute_adopt"].annotations.destructive_hint is False
+            assert tools["compute_adopt"].annotations.idempotent_hint is True
+            assert tools["compute_adopt"].annotations.open_world_hint is True
 
             launched = await client.call_tool(
                 "compute_launch",
@@ -96,6 +130,17 @@ def test_real_sdk_client_lists_tools_and_invokes_bound_owner():
 
             logs = await client.call_tool("compute_logs", {"task_id": "task-1", "tail": 5})
             assert _structured(logs) == {"result": [{"message": "hello"}]}
+
+            discovered = await client.call_tool(
+                "compute_discover",
+                {"kind": "command", "limit": 7, "offset": 2},
+            )
+            assert _structured(discovered)["owner"] == "alice"
+
+            adopted = await client.call_tool(
+                "compute_adopt", {"kind": "command", "remote_id": "remote-1"}
+            )
+            assert _structured(adopted)["task_id"] == "adopted-1"
 
             consulted = await client.call_tool(
                 "compute_consult",
@@ -108,6 +153,8 @@ def test_real_sdk_client_lists_tools_and_invokes_bound_owner():
             assert _structured(consulted)["workflow_id"] == "workflow-1"
 
         assert ("launch", {"command": "true"}, "req-1", "alice") in service.calls
+        assert ("discover", "command", "alice", 7, 2) in service.calls
+        assert ("adopt", "command", "remote-1", "alice") in service.calls
         assert workflows.calls == [
             (
                 "submit",
@@ -207,7 +254,10 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
     async def exercise():
         async with Client(params) as client:
             tools = {tool.name for tool in (await client.list_tools()).tools}
+            assert len(tools) == 13
             assert "compute_plan" in tools
+            assert "compute_discover" in tools
+            assert "compute_adopt" in tools
             assert "compute_consult" not in tools
             assert "workflow_status" not in tools
             result = await client.call_tool(
@@ -258,7 +308,10 @@ def test_default_runtime_does_not_import_consultation_worker(tmp_path, monkeypat
     async def exercise():
         async with Client(server) as client:
             tools = {tool.name for tool in (await client.list_tools()).tools}
+            assert len(tools) == 13
             assert "compute_plan" in tools
+            assert "compute_discover" in tools
+            assert "compute_adopt" in tools
             assert "storage_check" in tools
             assert "compute_resources" in tools
             assert "compute_consult" not in tools
@@ -317,6 +370,7 @@ def test_codex_backend_passes_deployment_options_and_registers_tools(tmp_path, m
     async def exercise():
         async with Client(server) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert len(tools) == 15
             assert "compute_consult" in tools
             assert "workflow_status" in tools
 

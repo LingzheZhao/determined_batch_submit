@@ -207,6 +207,21 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("task_id")
     reconcile.add_argument("remote_id")
 
+    discover = commands.add_parser(
+        "discover",
+        help="Discover existing remote tasks of one kind without registering or submitting them",
+    )
+    discover.add_argument("kind", choices=("command", "shell", "experiment"))
+    discover.add_argument("--limit", type=int, default=50)
+    discover.add_argument("--offset", type=int, default=0)
+
+    adopt = commands.add_parser(
+        "adopt",
+        help="Register an existing remote task locally without submitting new work",
+    )
+    adopt.add_argument("kind", choices=("command", "shell", "experiment"))
+    adopt.add_argument("remote_id")
+
     commands.add_parser("list", help="List tasks in the bound owner namespace")
     resources = commands.add_parser("resources", help="Inspect current cluster scheduling capacity")
     resources.add_argument("--slots", type=int, default=1, help="Required slots; zero checks auxiliary capacity")
@@ -240,6 +255,10 @@ def _dispatch(args: argparse.Namespace, service: ComputeService, owner: str) -> 
         return service.cancel(args.task_id, owner)
     if args.command == "reconcile":
         return service.reconcile(args.task_id, owner, args.remote_id)
+    if args.command == "discover":
+        return service.discover(args.kind, owner, args.limit, args.offset)
+    if args.command == "adopt":
+        return service.adopt(args.kind, args.remote_id, owner)
     if args.command == "list":
         return service.list_tasks(owner)
     raise ValueError(f"unknown command: {args.command}")

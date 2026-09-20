@@ -136,6 +136,24 @@ def create_server(
 
         return await call(service.list_tasks, owner)
 
+    @server.tool(annotations=ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True,
+    ))
+    async def compute_discover(
+        kind: str, limit: int = 50, offset: int = 0
+    ) -> dict[str, Any]:
+        """Discover one kind of remote task with bounded pagination; this does not adopt it."""
+
+        return await call(service.discover, kind, owner, limit, offset)
+
+    @server.tool(annotations=ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True,
+    ))
+    async def compute_adopt(kind: str, remote_id: str) -> dict[str, Any]:
+        """Register an existing remote task in the local owner namespace without submitting work."""
+
+        return await call(service.adopt, kind, remote_id, owner)
+
     if resource_inspector is not None:
 
         @server.tool(annotations=ToolAnnotations(
