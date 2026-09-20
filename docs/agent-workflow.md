@@ -88,9 +88,8 @@ Grafana, and other service credentials. This also prevents the consultation
 from recursively calling the service's MCP server.
 
 The fixed default model is `gpt-5.6-sol`. A deployment may supply a different
-model explicitly for testing or controlled migration. Before deployment, check
-the installed CLI contract with `codex exec --help`; tests use a fake executable
-and never make a paid model call.
+model explicitly when needed. When upgrading Codex, check the installed CLI
+contract with `codex exec --help`.
 
 Each run has a wall-clock timeout. On timeout, the worker terminates the whole
 Codex process group and persists a `timed_out` state. Internal database
