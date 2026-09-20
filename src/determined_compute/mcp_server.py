@@ -178,7 +178,7 @@ def create_server(
             request_id: str,
             context: Optional[dict[str, Any]] = None,
         ) -> dict[str, Any]:
-            """Queue a read-only Codex consultation for this repository."""
+            """Queue a read-only consultation for this repository."""
 
             try:
                 return await asyncio.to_thread(
@@ -221,7 +221,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--owner",
         help="Bound owner namespace (or DETERMINED_COMPUTE_OWNER)",
     )
-    parser.add_argument("--repo-root", help="Repository root used by compute_consult")
+    parser.add_argument(
+        "--repo-root",
+        help="Optional repository root for the configured consultation backend",
+    )
+    parser.add_argument(
+        "--consultation-backend",
+        choices=("none", "codex"),
+        default="none",
+        help="Optional repository consultation backend (default: none)",
+    )
+    parser.add_argument(
+        "--consultation-model",
+        help="Model for the optional Codex consultation backend",
+    )
+    parser.add_argument(
+        "--consultation-codex-bin",
+        help="Codex executable for the consultation backend (default: codex)",
+    )
     parser.add_argument("--api-url", help="Determined master URL (defaults to DET_MASTER)")
     parser.add_argument("--api-token", help="Determined API token (defaults to DET_API_TOKEN)")
     parser.add_argument("--secrets-file", help="Path to a KEY=VALUE secrets file")
@@ -233,6 +250,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _runtime(args: argparse.Namespace) -> tuple[Any, str]:
+    if args.consultation_backend == "none":
+        consultation_options = [
+            name
+            for name, value in (
+                ("--consultation-model", args.consultation_model),
+                ("--consultation-codex-bin", args.consultation_codex_bin),
+            )
+            if value is not None
+        ]
+    else:
+        consultation_options = []
+    if consultation_options:
+        raise ValueError(
+            f"{', '.join(consultation_options)} require --consultation-backend codex"
+        )
+
     profile_path = args.profile or os.environ.get("DETERMINED_COMPUTE_PROFILE")
     if not profile_path:
         raise ValueError("--profile or DETERMINED_COMPUTE_PROFILE is required")
@@ -247,9 +280,6 @@ def _runtime(args: argparse.Namespace) -> tuple[Any, str]:
     if db_path != Path(":memory:"):
         db_path.expanduser().parent.mkdir(parents=True, exist_ok=True)
         db_path = db_path.expanduser()
-    repo_root = Path(
-        args.repo_root or os.environ.get("DETERMINED_COMPUTE_REPO_ROOT") or os.getcwd()
-    ).resolve()
     profile = ComputeProfile.from_file(profile_path)
     store = SQLiteTaskStore(db_path)
 
@@ -268,12 +298,19 @@ def _runtime(args: argparse.Namespace) -> tuple[Any, str]:
     access = StorageAccessConfig.from_file(access_path) if access_path else StorageAccessConfig()
     storage = StorageService(profile, access, Path(args.secrets_file).expanduser() if args.secrets_file else None)
 
-    try:
+    workflow_manager = None
+    if args.consultation_backend == "codex":
         from determined_compute.agent_worker import WorkflowManager
-    except ImportError:
-        workflow_manager = None
-    else:
-        workflow_manager = WorkflowManager(db_path, repo_root)
+
+        repo_root = Path(
+            args.repo_root or os.environ.get("DETERMINED_COMPUTE_REPO_ROOT") or os.getcwd()
+        ).resolve()
+        workflow_options: dict[str, Any] = {}
+        if args.consultation_model is not None:
+            workflow_options["model"] = args.consultation_model
+        if args.consultation_codex_bin is not None:
+            workflow_options["codex_bin"] = args.consultation_codex_bin
+        workflow_manager = WorkflowManager(db_path, repo_root, **workflow_options)
     from determined_compute.compute.admission import ResourceInspector
     return create_server(service, owner, workflow_manager, storage, ResourceInspector(service.client)), owner
 

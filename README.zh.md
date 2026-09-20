@@ -4,6 +4,8 @@
 
 通过 MCP 或 JSON CLI 运行 Determined 任务。代码、数据和输出保存在映射的共享存储中，不打包上传项目。一次性任务使用 `command`，交互调试使用 `shell`，长时间训练或试验管理使用 `experiment`。
 
+任何能够启动本地 stdio MCP 服务的 agent 客户端都可以使用。模型由客户端选择，常规计算和存储工作流不依赖 Codex 或 GPT。
+
 ## 安装
 
 需要 Python 3.10+，以及可访问的 Determined 集群和共享存储。
@@ -37,20 +39,22 @@ DET_API_TOKEN=your-api-token
 
 ## 接入 MCP 客户端
 
-使用 Codex 时，在仓库根目录执行：
+在客户端的 MCP 设置中添加名为 `determined-compute` 的 stdio 服务。按客户端的配置格式填写以下命令和参数，并替换 `/absolute/path/to/repo` 与 `your-owner`：
 
-```bash
-codex mcp add determined-compute -- \
-  "$PWD/.venv/bin/determined-compute-mcp" \
-  --profile "$PWD/.local/profile.yaml" \
-  --db "$PWD/.local/tasks.sqlite3" \
-  --owner "$USER" \
-  --repo-root "$PWD" \
-  --secrets-file "$PWD/.local/credentials.env" \
-  --verify-ssl
+```json
+{
+  "command": "/absolute/path/to/repo/.venv/bin/determined-compute-mcp",
+  "args": [
+    "--profile", "/absolute/path/to/repo/.local/profile.yaml",
+    "--db", "/absolute/path/to/repo/.local/tasks.sqlite3",
+    "--owner", "your-owner",
+    "--secrets-file", "/absolute/path/to/repo/.local/credentials.env",
+    "--verify-ssl"
+  ]
+}
 ```
 
-其他 MCP 客户端可通过 stdio 启动同一程序，并传入相同参数。请使用绝对路径。使用相同数据库和 owner 的会话共享任务记录；owner 是命名空间，不是认证机制。
+请使用绝对路径。使用相同数据库和 owner 的会话共享任务记录；owner 是命名空间，不是认证机制。若存储访问依赖 SSH 认证代理，请通过客户端的环境设置，让 MCP 进程继承 `SSH_AUTH_SOCK`。
 
 1. 为请求填写清晰的 `name` 和 `description`，再将 `request.json` 的内容传给 `compute_plan(request)`。
 2. 调用 `compute_launch(request, request_id)`，保存返回的 `task_id`。
@@ -58,7 +62,7 @@ codex mcp add determined-compute -- \
 
 提交前默认检查可用容量并避免排队；确实需要排队时显式设置 `allow_queue: true`。重试同一次提交时复用原 `request_id`。如果无法确定是否提交成功，先检查已有任务，再决定后续操作。
 
-可选：调用 `compute_consult(question, request_id)` 启动只读的 `gpt-5.6-sol` 咨询，再用 `workflow_status(workflow_id)` 获取结果。此功能需要已安装并登录的 Codex CLI；worker 会自动读取仓库内的 skill。
+客户端可以直接用这些工具规划任务。服务端咨询默认关闭；如需启用可选的 Codex 后端并指定其模型，请参阅[咨询配置](docs/agent-workflow.md)。咨询后端的模型与客户端使用的模型分别配置。
 
 ## 使用 CLI
 

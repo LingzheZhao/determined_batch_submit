@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import sys
 import threading
@@ -12,7 +13,7 @@ pytest.importorskip("mcp")
 
 from mcp import Client, StdioServerParameters
 
-from determined_compute.mcp_server import create_server
+from determined_compute.mcp_server import _runtime, build_parser, create_server
 
 
 class FakeService:
@@ -182,7 +183,7 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
         "defaults:\n  image: image\n  pool: pool\n",
         encoding="utf-8",
     )
-    # Tests may run from a source checkout or an installed wheel.
+    # Default runtime must not require a repository skill or consultation backend.
     repo_root = Path(__file__).resolve().parents[1]
     source_root = str(repo_root / "src")
     params = StdioServerParameters(
@@ -197,7 +198,7 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
             "--owner",
             "alice",
             "--repo-root",
-            str(repo_root),
+            str(tmp_path),
         ],
         env={"PYTHONPATH": source_root},
         cwd=str(tmp_path),
@@ -207,6 +208,8 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
         async with Client(params) as client:
             tools = {tool.name for tool in (await client.list_tools()).tools}
             assert "compute_plan" in tools
+            assert "compute_consult" not in tools
+            assert "workflow_status" not in tools
             result = await client.call_tool(
                 "compute_plan",
                 {
@@ -221,3 +224,121 @@ def test_stdio_subprocess_initializes_and_calls_offline_plan(tmp_path):
             assert result.structured_content["kind"] == "command"
 
     asyncio.run(asyncio.wait_for(exercise(), timeout=10))
+
+
+def test_default_runtime_does_not_import_consultation_worker(tmp_path, monkeypatch):
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        "mounts:\n  - host_path: /shared\n    container_path: /shared\n"
+        "defaults:\n  image: image\n  pool: pool\n",
+        encoding="utf-8",
+    )
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "determined_compute.agent_worker":
+            raise AssertionError("default MCP runtime imported consultation worker")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    args = build_parser().parse_args(
+        [
+            "--profile",
+            str(profile),
+            "--db",
+            str(tmp_path / "tasks.db"),
+            "--owner",
+            "alice",
+            "--repo-root",
+            str(tmp_path),
+        ]
+    )
+    server, owner = _runtime(args)
+
+    async def exercise():
+        async with Client(server) as client:
+            tools = {tool.name for tool in (await client.list_tools()).tools}
+            assert "compute_plan" in tools
+            assert "storage_check" in tools
+            assert "compute_resources" in tools
+            assert "compute_consult" not in tools
+            assert "workflow_status" not in tools
+            result = await client.call_tool(
+                "compute_plan",
+                {
+                    "request": {
+                        "command": "true",
+                        "workdir": "/shared/work",
+                        "output_dir": "/shared/output",
+                    }
+                },
+            )
+            assert result.is_error is False
+
+    assert owner == "alice"
+    asyncio.run(asyncio.wait_for(exercise(), timeout=10))
+
+
+def test_codex_backend_passes_deployment_options_and_registers_tools(tmp_path, monkeypatch):
+    profile = tmp_path / "profile.yaml"
+    profile.write_text(
+        "mounts:\n  - host_path: /shared\n    container_path: /shared\n"
+        "defaults:\n  image: image\n  pool: pool\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    class Manager(FakeWorkflowManager):
+        def __init__(self, db_path, repo_root, **kwargs):
+            super().__init__()
+            captured.update(db_path=db_path, repo_root=repo_root, kwargs=kwargs)
+
+    monkeypatch.setattr("determined_compute.agent_worker.WorkflowManager", Manager)
+    args = build_parser().parse_args(
+        [
+            "--profile",
+            str(profile),
+            "--db",
+            str(tmp_path / "tasks.db"),
+            "--owner",
+            "alice",
+            "--repo-root",
+            str(tmp_path),
+            "--consultation-backend",
+            "codex",
+            "--consultation-model",
+            "configured-model",
+            "--consultation-codex-bin",
+            "/opt/codex/bin/codex",
+        ]
+    )
+    server, _owner = _runtime(args)
+
+    async def exercise():
+        async with Client(server) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert "compute_consult" in tools
+            assert "workflow_status" in tools
+
+    asyncio.run(asyncio.wait_for(exercise(), timeout=10))
+    assert captured == {
+        "db_path": tmp_path / "tasks.db",
+        "repo_root": tmp_path.resolve(),
+        "kwargs": {
+            "model": "configured-model",
+            "codex_bin": "/opt/codex/bin/codex",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        ["--consultation-model", "configured-model"],
+        ["--consultation-codex-bin", "/opt/codex/bin/codex"],
+    ],
+)
+def test_consultation_options_require_codex_backend(option):
+    args = build_parser().parse_args(option)
+    with pytest.raises(ValueError, match="require --consultation-backend codex"):
+        _runtime(args)

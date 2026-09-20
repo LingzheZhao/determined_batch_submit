@@ -5,7 +5,7 @@ description: Plan, launch, inspect, and stop resource-intensive GPU or CPU work 
 
 # Intensive Compute Runner
 
-Use this repository's `ComputeService` for heavy-compute planning, idempotent launch, task state, logs, and cancellation. The dedicated consultation worker loads this repository skill; do not install it globally.
+Use this repository's `ComputeService` for heavy-compute planning, idempotent launch, task state, logs, and cancellation. Any MCP-capable agent can use the tools with its own model. An optional consultation worker can also load this repository skill; do not install it globally.
 
 ## Choose a mode
 
@@ -41,7 +41,7 @@ Never include credentials in requests, configs, logs, or reports. A launch with 
 
 If launch outcome is unknown after a timeout or connection loss, do not submit again blindly. Use `compute_reconcile` only with a verified remote ID for the known task; the service checks its submission marker before binding. If authentication fails, stop and report the configuration problem; do not fall back to local execution.
 
-`compute_consult` may ask the dedicated `gpt-5.6-sol` worker for a read-only plan or diagnosis. Its workflow state persists, but it cannot launch or cancel work; deterministic service tools perform mutations.
+If the server exposes `compute_consult`, it can request a read-only plan or diagnosis from the deployment's configured consultation backend and model. Consultation is optional; the caller can plan directly with its own model. Consultation state persists, but the worker cannot launch or cancel work; deterministic service tools perform mutations.
 
 ## Report
 

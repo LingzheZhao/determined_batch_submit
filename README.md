@@ -4,6 +4,8 @@
 
 Run Determined jobs through MCP or a JSON CLI. Code, data and outputs stay on mapped shared storage; no project uploads. Use `command` for one-off jobs, `shell` for interactive debugging, and `experiment` for long-running training or trial management.
 
+Use any agent client that can start a local stdio MCP server. The client chooses its model; the standard compute and storage workflow requires neither Codex nor GPT.
+
 ## Install
 
 Requires Python 3.10+ and access to a Determined cluster with shared storage.
@@ -37,20 +39,22 @@ Username/password authentication also supports `DET_USERNAME` and `DET_PASSWORD`
 
 ## Connect an MCP client
 
-For Codex, run from the repository root:
+Add a stdio server named `determined-compute` in your client's MCP settings. Use these command and argument values in the client's configuration format, replacing `/absolute/path/to/repo` and `your-owner`:
 
-```bash
-codex mcp add determined-compute -- \
-  "$PWD/.venv/bin/determined-compute-mcp" \
-  --profile "$PWD/.local/profile.yaml" \
-  --db "$PWD/.local/tasks.sqlite3" \
-  --owner "$USER" \
-  --repo-root "$PWD" \
-  --secrets-file "$PWD/.local/credentials.env" \
-  --verify-ssl
+```json
+{
+  "command": "/absolute/path/to/repo/.venv/bin/determined-compute-mcp",
+  "args": [
+    "--profile", "/absolute/path/to/repo/.local/profile.yaml",
+    "--db", "/absolute/path/to/repo/.local/tasks.sqlite3",
+    "--owner", "your-owner",
+    "--secrets-file", "/absolute/path/to/repo/.local/credentials.env",
+    "--verify-ssl"
+  ]
+}
 ```
 
-Other MCP clients can launch the same executable and arguments using stdio. Use absolute paths. Sessions with the same database and owner share task records; owner names are namespaces, not authentication.
+Use absolute paths. Sessions with the same database and owner share task records; owner names are namespaces, not authentication. If storage access uses an SSH agent, let the MCP process inherit `SSH_AUTH_SOCK` through your client's environment settings.
 
 1. Give the request a meaningful `name` and `description`, then call `compute_plan(request)` with the contents of `request.json`.
 2. Call `compute_launch(request, request_id)` and keep the returned `task_id`.
@@ -58,7 +62,7 @@ Other MCP clients can launch the same executable and arguments using stdio. Use 
 
 Launches check current capacity and avoid queuing by default; set `allow_queue: true` only when queuing is intended. Reuse the same `request_id` when retrying the same launch. If acceptance is uncertain, inspect the existing task before starting another.
 
-Optional: `compute_consult(question, request_id)` starts a read-only `gpt-5.6-sol` consultation; retrieve its result with `workflow_status(workflow_id)`. This requires an installed, signed-in Codex CLI. The worker reads the repository skill automatically.
+The client can plan directly with these tools. Server-side consultation is disabled by default. To add the optional Codex backend and choose its model, see [consultation setup](docs/agent-workflow.md); it is separate from the client's model choice.
 
 ## Use the CLI
 

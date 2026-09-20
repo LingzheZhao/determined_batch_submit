@@ -1,10 +1,41 @@
-# Compute consultation workflows
+# Agent workflows and optional consultation
 
-The service can run a dedicated Codex consultation before a caller chooses an
-explicit compute action. The consultation reads this repository and
-`skills/intensive-compute-runner/SKILL.md`, then returns a diagnosis or plan. It
-does not submit, launch, cancel, or edit anything. Those state changes remain in
-the deterministic MCP tools.
+Any client that supports a local stdio MCP server can use the compute and storage
+tools. The client chooses its agent and model, plans the work, then calls
+`compute_plan`, `compute_launch`, status/log tools and storage tools as needed.
+This standard workflow does not require Codex, GPT or a consultation worker.
+
+Server-side consultation is an optional extension. The built-in backend is
+currently Codex; it does not constrain the calling client's provider or model.
+When enabled, it reads `skills/intensive-compute-runner/SKILL.md` and returns a
+read-only diagnosis or plan. It does not submit, launch, cancel or edit anything.
+
+## Enable the optional Codex backend
+
+The MCP server defaults to `--consultation-backend none`; it does not register
+`compute_consult` or `workflow_status`. It also does not require repository skill
+files or a Codex installation for the standard tools.
+
+To enable consultation, install and sign in to Codex on the server machine, then
+add the backend, model and repository options to the server startup command:
+
+```bash
+determined-compute-mcp \
+  --profile /absolute/path/to/profile.yaml \
+  --db /absolute/path/to/tasks.sqlite3 \
+  --owner your-owner \
+  --secrets-file /absolute/path/to/credentials.env \
+  --verify-ssl \
+  --repo-root /absolute/path/to/determined_cluster_mcp \
+  --consultation-backend codex \
+  --consultation-model MODEL_ID
+```
+
+Replace `MODEL_ID` with a model supported by that Codex installation and account.
+Use `--consultation-codex-bin /absolute/path/to/codex` if the executable is not on
+`PATH`. These are deployment settings, not MCP tool arguments. If no model is
+specified for the Codex backend, its default is `gpt-5.6-sol`. The calling client
+can use a different model or omit consultation entirely.
 
 ## Lifecycle
 
@@ -37,7 +68,7 @@ manager = WorkflowManager(
     db_path="/var/lib/determined-compute/agent-workflows.sqlite3",
     repo_root="/path/to/determined-compute-service",
     codex_bin="codex",
-    model="gpt-5.6-sol",
+    model="MODEL_ID",
     timeout_seconds=900,
 )
 
@@ -64,7 +95,7 @@ limits.
 
 ## Worker command and isolation
 
-For normal service use, `submit()` starts the worker automatically. A queued or
+When consultation is enabled, `submit()` starts the worker automatically. A queued or
 interrupted record can also be processed by a supervisor with:
 
 ```bash
@@ -73,7 +104,7 @@ python -m determined_compute.agent_worker worker \
   --repo-root /path/to/determined-compute-service \
   --workflow-id <workflow-id> \
   --codex-bin codex \
-  --model gpt-5.6-sol \
+  --model MODEL_ID \
   --timeout-seconds 900 \
   --stale-after-seconds 120
 ```
@@ -87,9 +118,9 @@ the normal `CODEX_HOME` authentication location while omitting Determined,
 Grafana, and other service credentials. This also prevents the consultation
 from recursively calling the service's MCP server.
 
-The fixed default model is `gpt-5.6-sol`. A deployment may supply a different
-model explicitly when needed. When upgrading Codex, check the installed CLI
-contract with `codex exec --help`.
+The model is supplied by the deployment's consultation configuration, separately
+from the caller's model. When upgrading Codex, check the installed CLI contract
+with `codex exec --help`.
 
 Each run has a wall-clock timeout. On timeout, the worker terminates the whole
 Codex process group and persists a `timed_out` state. Internal database

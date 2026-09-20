@@ -6,14 +6,14 @@ The service separates deterministic task control from optional agent advice:
 
 ```mermaid
 flowchart LR
-    S[Codex session] -->|stdio, owner fixed at startup| M[MCP tools]
+    S[Any stdio MCP client] -->|owner fixed at startup| M[MCP tools]
     M --> C[ComputeService]
     C --> D[(local SQLite state DB)]
     C --> A[Determined API adapter]
     A --> K[Determined cluster]
-    M --> W[read-only agent workflow]
+    M -. explicitly enabled .-> W[read-only consultation]
     W --> D
-    W --> X[gpt-5.6-sol worker]
+    W --> X[Configured optional backend]
     P[compute profile] --> C
     R[repo skill + request] --> X
     H[mapped shared storage] <--> K
@@ -23,7 +23,7 @@ flowchart LR
 
 The MCP server is a local stdio service for one trusted user. It binds `owner` when the process starts, so tools cannot claim another namespace. Separate sessions can use separate owner names against one database; deliberate collaboration can share a name. This boundary helps organize tasks but does not provide multi-user security. An exposed or remote service needs a separate transport and authentication design.
 
-The consultation workflow starts an isolated Codex worker configured for `gpt-5.6-sol`. The worker receives the user request and this repository's compute skill, has read-only responsibility, and persists its workflow state. Its advice does not launch or cancel work. Only deterministic tools mutate compute state.
+The standard workflow is client and model independent: the caller plans with its own agent and invokes deterministic tools. Consultation is disabled by default. An operator can enable the optional Codex backend with a chosen model; its read-only worker receives the request and repository skill and persists its workflow state. Its advice does not launch or cancel work. See [consultation setup](agent-workflow.md).
 
 ## Profile
 
@@ -125,8 +125,10 @@ The tools are:
 | `compute_cancel` | `task_id` | Updated task object |
 | `compute_reconcile` | `task_id`, `remote_id` | Safely bind a verified uncertain submission |
 | `compute_list_tasks` | none | Tasks in the startup-bound owner namespace |
-| `compute_consult` | `question`, `request_id`, optional `context` | Persisted workflow object |
-| `workflow_status` | `workflow_id` | Current persisted workflow object |
+| `compute_consult` (optional) | `question`, `request_id`, optional `context` | Persisted workflow object |
+| `workflow_status` (optional) | `workflow_id` | Current persisted workflow object |
+
+`compute_consult` and `workflow_status` are advertised only when a consultation backend is enabled. Standard compute and storage tools do not need a Codex installation, a consultation model or the repository skill files.
 
 Launch requests may include an optional single-line `name`. Commands and shells use it
 as their Determined display description; experiments use it as the native experiment
