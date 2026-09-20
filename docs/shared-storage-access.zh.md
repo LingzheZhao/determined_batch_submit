@@ -1,11 +1,12 @@
 # 从客户端访问共享存储
 
-[English](shared-storage-access.md)
+[English](shared-storage-access.md) | [简体中文](shared-storage-access.zh.md)
 
 Determined 任务使用计算配置中的共享主机路径与容器路径映射。可选的存储客户端让未挂载这些文件系统的机器通过登录节点检查、同步和取回文件。它不会通过 Determined 上传源码。
 
 如果工作目录已经准备在共享存储上，提交任务只需要 Determined 认证。只有在所选路径没有本地挂载、并调用 `storage_check`、`storage_sync` 或 `storage_fetch` 时才需要 SSH。
 
+<a id="configure-access-separately"></a>
 ## 单独配置存储访问
 
 把访问方式放在独立 YAML 文件中，通过 `--storage-config PATH` 或 `DETERMINED_COMPUTE_STORAGE` 指定。该文件不会改变计算配置指纹或任务身份。
@@ -49,8 +50,10 @@ Host cluster-login
 
 OpenSSH 说明 `ProxyJump` 会先连接跳板机，并建议把目标机和跳板机各自的设置写入 `~/.ssh/config`。首次连接时应交互式核对可信来源提供的主机密钥指纹，再进入自动化。存储后端强制使用 `StrictHostKeyChecking=yes`，因此经验证的密钥必须已经写入 `known_hosts`；不要使用 `StrictHostKeyChecking=no`。参见官方 [`ssh_config(5)`](https://man.openbsd.org/ssh_config.5)。
 
+<a id="authentication-choices"></a>
 ## 认证方式
 
+<a id="ssh-key-and-agent-auth-openssh"></a>
 ### SSH 密钥与 agent（`auth: openssh`）
 
 服务只继承已有 agent，不会启动或解锁 agent。先检查当前 agent；仅当环境中没有可用 socket 时再启动：
@@ -82,6 +85,7 @@ env_vars = ["SSH_AUTH_SOCK"]
 
 Codex 官方文档把 `env_vars` 定义为转发给 stdio MCP 服务的环境变量白名单。GUI 客户端本身也必须继承 `SSH_AUTH_SOCK`：先退出已经运行的实例，再从准备好 agent 的终端启动新实例（macOS 可用 `open -na Codex`）；或者在客户端启动器环境中传入该变量，然后重启 MCP 服务。参见 [Codex MCP 配置](https://developers.openai.com/codex/mcp)。
 
+<a id="password-auth-password"></a>
 ### 密码（`auth: password`）
 
 把登录节点凭据写入现有 secrets 文件，不要放进存储配置、MCP 参数、任务请求或报告：
@@ -95,6 +99,7 @@ SSH_PASSWORD=replace-me
 
 可以通过现有的全局 `--secrets-file` 参数或 `DETERMINED_COMPUTE_SECRETS` 选择非默认 secrets 文件。省略 `ssh.user` 时，`SSH_USERNAME` 可以提供用户名；两者同时存在时必须一致。
 
+<a id="os-keyring-auth-keyring"></a>
 ### 系统钥匙串（`auth: keyring`）
 
 在服务使用的 Python 环境中安装可选凭据后端：
@@ -111,6 +116,7 @@ python -m keyring set determined-compute alice
 
 所选 keyring 后端必须已经解锁，并且服务进程能够访问。这里保存的是账户密码，不负责解锁 SSH 私钥；私钥口令应通过 `ssh-add` 加载到 `ssh-agent`。[keyring 文档](https://keyring.readthedocs.io/en/stable/)说明了后端选择、诊断以及 `get_password`/`set_password` 的行为。
 
+<a id="check-preview-and-transfer"></a>
 ## 检查、预览和传输
 
 Python 接口为 `StorageService.check(path)`、`sync(local_dir, shared_dir, dry_run=True)` 和 `fetch(shared_dir, local_dir, dry_run=True)`。CLI 与 MCP 使用相同的路径规则。`check` 返回所选后端、容器路径、转换后的主机路径、可选本地路径、存在性、类型以及读写权限。同步/取回复制目录内容，并返回操作、后端、解析后的两端路径、主机路径、排除项、实际 `preserve_permissions`、dry-run/完成状态，以及带 `truncated` 标志的长度受限输出。本地结果包含映射路径；SSH 结果只暴露配置的主机别名，不返回用户名、密钥路径或凭据。
@@ -144,6 +150,7 @@ Rsync 退出码 23 表示部分文件或属性未能传输，目标中可能已�
 
 请确认客户端和登录节点都安装了 rsync 3.2.3 或更高版本，因为后端始终使用 `--mkpath`。官方 [rsync 手册](https://rsync.samba.org/ftp/rsync/rsync.1)还说明 `-s` 通过协议而不是远端 shell 传递参数。
 
+<a id="reuse-an-ssh-connection"></a>
 ## 复用 SSH 连接
 
 连接复用可以减少重复认证。把控制 socket 放进只有当前用户可写的目录：

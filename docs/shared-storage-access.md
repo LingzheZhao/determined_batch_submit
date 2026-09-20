@@ -1,6 +1,6 @@
 # Shared storage access from a client
 
-[简体中文](shared-storage-access.zh.md)
+[English](shared-storage-access.md) | [简体中文](shared-storage-access.zh.md)
 
 Determined tasks use the shared host/container mappings in the compute profile. The optional storage client lets a machine that does not mount those filesystems check, stage, and fetch files through a login node. It does not upload source through Determined.
 

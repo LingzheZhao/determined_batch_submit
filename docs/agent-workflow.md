@@ -1,147 +1,127 @@
-# Agent workflows and optional consultation
+# Agent workflow
 
-Any client that supports a local stdio MCP server can use the compute and storage
-tools. The client chooses its agent and model, plans the work, then calls
-`compute_plan`, `compute_launch`, status/log tools and storage tools as needed.
-This standard workflow does not require Codex, GPT or a consultation worker.
+[English](agent-workflow.md) | [简体中文](agent-workflow.zh.md)
 
-Server-side consultation is an optional extension. The built-in backend is
-currently Codex; it does not constrain the calling client's provider or model.
-When enabled, it reads `skills/intensive-compute-runner/SKILL.md` and returns a
-read-only diagnosis or plan. It does not submit, launch, cancel or edit anything.
+[Home](../README.md) · [Compute reference](compute-service.md) · [Storage access](shared-storage-access.md) · [Troubleshooting](troubleshooting.md)
 
-## Enable the optional Codex backend
+This workflow is for any agent or client that can call the local stdio MCP tools. The client selects its own model. Normal storage and compute work does not require Codex, a repository skill, or server-side consultation.
 
-The MCP server defaults to `--consultation-backend none`; it does not register
-`compute_consult` or `workflow_status`. It also does not require repository skill
-files or a Codex installation for the standard tools.
+## Describe the goal and success criteria
 
-To enable consultation, install and sign in to Codex on the server machine, then
-add the backend, model and repository options to the server startup command:
+State what should run and what observable result will count as success. Include the project revision, input and output locations, expected artifact or metric, and known resource needs. Refer to a credential file or SSH alias, never credential values.
 
-```bash
-determined-compute-mcp \
-  --profile /absolute/path/to/profile.yaml \
-  --db /absolute/path/to/tasks.sqlite3 \
-  --owner your-owner \
-  --secrets-file /absolute/path/to/credentials.env \
-  --verify-ssl \
-  --repo-root /absolute/path/to/determined_cluster_mcp \
-  --consultation-backend codex \
-  --consultation-model MODEL_ID
+The following deployment inputs must come from the cluster administrator or the project's existing configuration; do not invent them:
+
+- Determined API URL and account credentials
+- approved image and resource pool
+- cluster-agent host paths and their container mount paths
+- optional local mount or login-node SSH access to shared storage
+
+A useful request is: “Evaluate this revision with one slot, avoid queuing, write `metrics.json` under the shared results directory, and report the task IDs, exit result, and whether that file exists.”
+
+## Read local configuration first
+
+Read `AGENTS.md`, the project's own instructions, the configured compute profile, the relevant request example, and the storage-access configuration when present. Reuse project choices that are current and explicit. Ask for a missing required deployment value instead of guessing.
+
+Do not read or print credential values merely to confirm configuration. The MCP server receives credentials through its secrets file or environment. Treat image and pool values in examples as placeholders unless the project or administrator explicitly selected them.
+
+Choose the task kind according to the work:
+
+| Kind | Use it for |
+| --- | --- |
+| `command` | A finite, non-interactive run such as evaluation, conversion, or a build |
+| `shell` | Interactive debugging that needs a reconnectable environment |
+| `experiment` | Training, searches, trials, or long-running work that uses Determined experiment features |
+
+The MCP does not accept `kind: notebook`.
+
+## Understand the three path namespaces
+
+| Namespace | Used by | Example role |
+| --- | --- | --- |
+| Container path | `workdir`, `output_dir`, `storage_check.path`, and `storage_sync`/`storage_fetch.shared_dir` | Path visible inside a Determined task |
+| Cluster-agent host path | `mounts[].host_path` and shared-fs checkpoint configuration | Path mounted by the Determined agent; supplied by deployment configuration |
+| MCP-server local path | `storage_sync.local_dir` and `storage_fetch.local_dir` | Absolute path on the machine running the MCP server |
+
+The compute profile maps container paths to cluster-agent host paths. The optional storage configuration maps those host paths to a local mount or reaches them through SSH. The machine showing the chat can differ from the machine running the MCP server, so never infer a `local_dir` from what is visible in the UI.
+
+Keep source, data, packages, checkpoints, and outputs on mapped shared storage. `workdir` and `output_dir` must use writable container paths. Do not send a source archive or project upload through Determined.
+
+## Prepare shared files safely
+
+If the project is already complete on shared storage and the caller supplied its paths, a compute-only workflow can continue to plan and launch using Determined authentication; it does not need a local mount, SSH login, or storage configuration. When storage access is configured, use `storage_check` to verify the relevant container paths. If files need staging or direct client-side verification, configure storage access and then:
+
+1. Call `storage_check(path)` for the destination or its existing parent.
+2. Call `storage_sync(local_dir, shared_dir, dry_run=true)`.
+3. Review the resolved source, destination, backend, exclusions, and itemized changes.
+4. Call the identical operation with `dry_run=false` only when that preview is correct.
+5. Call `storage_check` again for the prepared working directory and required inputs.
+
+A transfer copies directory contents and does not delete extra destination files. It can replace same-named files, so the preview is part of the safety check. Without a storage backend, planning still does not verify remote file existence or permissions; make the workload validate required inputs and write an observable result. See [shared storage access](shared-storage-access.md) for SSH authentication, exclusions, and transfer behavior.
+
+## Check capacity and avoid accidental queues
+
+Call `compute_resources(slots, pool)` with the requested pool and slot count. A zero-slot command still needs the auxiliary-capacity check. Capacity is a current snapshot, not a reservation.
+
+Keep `allow_queue: false` unless the user explicitly wants the task to wait in a queue. If capacity is unavailable or unknown, report that result. Do not silently switch pools, change the slot count, or enable queuing.
+
+## Plan, review, and launch once
+
+Create a request with a meaningful `name` and `description`, the selected `kind`, command, container `workdir`, container `output_dir`, slot count, `allow_queue`, and a revision or content identifier when available. The image and pool may come from the compute profile or explicit approved overrides.
+
+```json
+{
+  "name": "evaluate-checkpoint",
+  "description": "Evaluate the selected checkpoint and write metrics to shared storage.",
+  "kind": "command",
+  "command": ["bash", "-lc", "python scripts/evaluate.py --output \"$COMPUTE_OUTPUT_DIR/metrics.json\""],
+  "workdir": "/shared-container/project/repo",
+  "output_dir": "/shared-container/project/results",
+  "slots": 1,
+  "code_revision": "REVISION_OR_CONTENT_ID",
+  "allow_queue": false
+}
 ```
 
-Replace `MODEL_ID` with a model supported by that Codex installation and account.
-Use `--consultation-codex-bin /absolute/path/to/codex` if the executable is not on
-`PATH`. These are deployment settings, not MCP tool arguments. If no model is
-specified for the Codex backend, its default is `gpt-5.6-sol`. The calling client
-can use a different model or omit consultation entirely.
+Call `compute_plan(request)` and inspect the resolved kind, image, pool, mounts, working directory, output directory, resource fields, and advisories. Planning validates and renders locally; it does not prove that remote files, permissions, credentials, or live capacity are valid.
 
-## Lifecycle
+Generate one stable, caller-controlled `request_id`, then call `compute_launch(request, request_id)`. Preserve the returned local `task_id` and remote ID in the work record. Repeating an identical request with the same request ID is idempotent; reusing it for different content is rejected.
 
-`WorkflowManager.submit()` stores the request in SQLite and starts a detached
-worker process. It returns a workflow ID without waiting for the model. Because
-the worker is an independent process and session, an MCP client disconnect does
-not cancel it. Call `WorkflowManager.status()` (or the MCP workflow-status tool)
-to poll for its persisted result.
+If the launch result is uncertain, do not create a new request ID or submit again. Inspect the local task and remote system. Use `compute_reconcile(task_id, remote_id)` only when repairing that same uncertain local submission and after identifying the matching remote task. See [troubleshooting](troubleshooting.md#submission-outcome-is-uncertain).
 
-Statuses are `queued`, `running`, `succeeded`, `failed`, and `timed_out`. The
-status response includes bounded lifecycle logs, a result on success, or a
-short sanitized error on failure. Questions, curated context, and results are
-stored in the workflow database, so that database must be protected like other
-service state.
+## Monitor and accept the result
 
-Status also reports `stale` and `recoverable`. A queued request becomes
-recoverable when its dispatch timestamp is stale; this covers a service crash
-between the database commit and worker spawn. Repeating the same idempotent
-submission after that interval dispatches a replacement worker, or an operator
-can run the worker command below. The transactional claim permits only one of
-those workers to start Codex. A stale running record is recoverable only after
-both recorded processes are no longer alive. There is no automatic retry loop.
+Call `compute_status(task_id)` until the task reaches a terminal state, and use `compute_logs(task_id, tail)` to inspect progress and the final messages. Cancel a running task with `compute_cancel(task_id)` when the user no longer needs it.
 
-The Python interface is:
+A successful submission or a terminal state alone is not acceptance. Check the process exit information and the success criteria defined at the start. When storage access is configured, verify expected shared artifacts with `storage_check`; otherwise use workload output or another explicit task-level check. When a local copy is needed, configure storage access, preview `storage_fetch(shared_dir, local_dir, dry_run=true)`, review it, then execute with `dry_run=false` and inspect the fetched result.
 
-```python
-from determined_compute.agent_worker import WorkflowManager
+Report the local task ID, remote ID, final state, exit result when available, output path, and observed artifact or metric. Never include tokens, passwords, private keys, cookies, or secrets-file contents.
 
-manager = WorkflowManager(
-    db_path="/var/lib/determined-compute/agent-workflows.sqlite3",
-    repo_root="/path/to/determined-compute-service",
-    codex_bin="codex",
-    model="MODEL_ID",
-    timeout_seconds=900,
-)
+## Discover and adopt existing remote tasks
 
-accepted = manager.submit(
-    question="Why is experiment 123 making no progress?",
-    owner="session-group",
-    request_id="client-generated-idempotency-key",
-    context={"experiment_id": 123, "recent_state": "QUEUED"},
-)
-current = manager.status(accepted["workflow_id"], owner="session-group")
-```
+Use discovery and adoption for a task created independently through the Determined WebUI, native CLI, or another device under the same Determined account:
 
-The service must derive `owner` from its configured caller
-namespace. It must not accept an arbitrary owner value from MCP tool arguments.
-The pair `(owner, request_id)` is an idempotency key. Repeating the same payload
-returns the existing workflow; reusing it for different content is an error.
-Looking up a workflow with another owner behaves like a missing workflow.
+1. Call `compute_discover(kind, limit=50, offset=0)` with `command`, `shell`, or `experiment`. This is a read-only remote query; it does not create a local record or submit work.
+2. Select the intended remote result, then call `compute_adopt(kind, remote_id)`.
+3. Keep the returned local `task_id` and use it with `compute_status`, `compute_logs`, and `compute_cancel`.
 
-Context must be a small JSON object curated by the caller. Fields whose names
-look like passwords, tokens, API keys, cookies, private keys, authorization, or
-credentials are rejected recursively. Do not place secrets in the question or
-in otherwise innocently named fields. Inputs and final results have fixed size
-limits.
+Adoption verifies the actual cluster, current authenticated account, and remote owner. It creates an idempotent local record and never relaunches the remote task. Unknown work paths, output paths, or revisions remain unknown. Adoption does not grant storage access or new cluster permissions.
 
-## Worker command and isolation
+Reconciliation has a narrower purpose: `compute_reconcile` repairs an existing local submission whose remote acceptance is uncertain by verifying its submission marker. It does not import independently created tasks. If an uncertain local record exists, reconcile it rather than adopting the corresponding remote task.
 
-When consultation is enabled, `submit()` starts the worker automatically. A queued or
-interrupted record can also be processed by a supervisor with:
+## Keep identity boundaries separate
 
-```bash
-python -m determined_compute.agent_worker worker \
-  --db /var/lib/determined-compute/agent-workflows.sqlite3 \
-  --repo-root /path/to/determined-compute-service \
-  --workflow-id <workflow-id> \
-  --codex-bin codex \
-  --model MODEL_ID \
-  --timeout-seconds 900 \
-  --stale-after-seconds 120
-```
+Four values participate in task identity and access:
 
-The worker invokes Codex with an argument array and prompt on standard input;
-no shell evaluates caller text. Its invocation uses `--ignore-user-config`,
-`--ignore-rules`, `--ephemeral`, `--sandbox read-only`, JSON event mode, and an
-explicit `mcp_servers={}` override. The repository is the Codex working
-directory. The process environment is rebuilt from a small allowlist, retaining
-the normal `CODEX_HOME` authentication location while omitting Determined,
-Grafana, and other service credentials. This also prevents the consultation
-from recursively calling the service's MCP server.
+| Value | Meaning |
+| --- | --- |
+| SQLite database | Local durable task records, idempotency, and reconciliation state |
+| `owner` | Namespace within that database; it is not authentication |
+| Determined account | API identity and remote authorization selected by credentials |
+| Cluster identity | Actual remote cluster used to prevent cross-cluster task confusion |
 
-The model is supplied by the deployment's consultation configuration, separately
-from the caller's model. When upgrading Codex, check the installed CLI contract
-with `codex exec --help`.
+Sessions share local records only when they use the same database and owner. Separate databases can adopt the same remote task independently. Keep the database on local durable disk rather than shared NFS. Sharing an owner does not share credentials, and changing credentials does not rename the owner namespace.
 
-Each run has a wall-clock timeout. On timeout, the worker terminates the whole
-Codex process group and persists a `timed_out` state. Internal database
-heartbeats record worker-process liveness; they are unrelated to Determined
-shell keepalive or experiment health. Heartbeats and process IDs guard stale
-recovery. A second worker will not execute a fresh run or a stale run whose
-recorded worker/agent process is still alive. When both processes are gone, an
-explicit worker invocation may reclaim the workflow and writes that recovery to
-the persisted log before retrying.
+## Optional consultation
 
-## Operational limits
-
-SQLite provides durable state and transactional claiming on one host; it is not
-a distributed job queue. Detached workers need access to the same local database
-and repository. Use a process supervisor to revisit queued records after a host
-restart. PID liveness is deliberately conservative: PID reuse can delay recovery
-until an operator inspects the record, while a hard crash can cause a read-only
-consultation to run again after the stale interval. The visible reclaim log is
-the audit signal for that retry.
-
-Codex output is advisory and untrusted. Review it before passing any proposed
-operation to launch or cancel tools. The read-only sandbox and empty MCP config
-limit model-side mutation, but host filesystem permissions and protection of the
-workflow database remain deployment responsibilities.
+The client agent can perform this workflow directly. Server-side consultation defaults to `none` and is not needed for any deterministic tool. A deployment may enable the separate read-only Codex backend and configure its model; that model is independent of the MCP client's model. Consultation can return advice but cannot launch, cancel, transfer files, or use the caller's MCP tools. See [optional consultation](consultation.md).

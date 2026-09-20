@@ -1,14 +1,14 @@
-# Determined Compute Service
+<a id="determined-cluster-mcp"></a>
+# Determined Cluster MCP
 
-[English](README.md)
+[English](README.md) | [简体中文](README.zh.md)
 
-通过 MCP 或 JSON CLI 运行 Determined 任务。代码、数据和输出保存在映射的共享存储中，不打包上传项目。一次性任务使用 `command`，交互调试使用 `shell`，长时间训练或试验管理使用 `experiment`。
+通过本地 stdio MCP 服务运行 Determined `command`、`shell` 和 `experiment` 任务。代码、数据、检查点和输出都保存在映射的共享存储中。任何能启动本地 stdio 服务的 MCP 客户端都可以使用本服务；客户端模型与可选的服务端咨询后端彼此独立。
 
-任何能够启动本地 stdio MCP 服务的 agent 客户端都可以使用。模型由客户端选择，常规计算和存储工作流不依赖 Codex 或 GPT。
-
+<a id="install"></a>
 ## 安装
 
-需要 Python 3.10+，以及可访问的 Determined 集群和共享存储。
+需要 Python 3.10+、Determined 账户，以及集群管理员或项目配置提供的部署参数。
 
 ```bash
 git clone https://github.com/WU-CVGL/determined_cluster_mcp.git
@@ -18,6 +18,7 @@ python3 -m venv .venv
 python -m pip install -e '.[mcp]'
 ```
 
+<a id="configure"></a>
 ## 配置
 
 ```bash
@@ -26,64 +27,44 @@ cp cfg/compute-profile.example.yaml .local/profile.yaml
 cp cfg/examples/command_request.json .local/request.json
 ```
 
-在 `profile.yaml` 中设置共享存储的宿主机路径、容器路径、镜像和资源池。在 `request.json` 中设置命令，并将 `workdir`、`output_dir` 改为映射内的**容器路径**。启动前，将运行所需的文件放到共享存储中。本机没有挂载时，参见[共享存储接入](docs/shared-storage-access.zh.md)。
-
-创建 `.local/credentials.env`：
+在 `.local/credentials.env` 中设置 API 地址和账户凭据：
 
 ```dotenv
-DET_MASTER=https://your-determined-server
-DET_API_TOKEN=your-api-token
+DET_MASTER=https://determined.example.org
+DET_API_TOKEN=replace-with-your-token
 ```
 
-也可在此文件中使用 `DET_USERNAME` 和 `DET_PASSWORD` 进行认证。SQLite 数据库应保存在本地磁盘上，不要放在共享 NFS 存储中。
+也支持 `DET_USERNAME` 和 `DET_PASSWORD`。不要提交凭据文件。使用管理员提供的镜像、资源池、计算节点宿主机路径和容器挂载路径填写 `profile.yaml`。任务请求使用容器路径。SQLite 数据库应保存在本地持久磁盘上，不要放在共享 NFS 中。
 
-## 接入 MCP 客户端
+计算任务不需要客户端存储配置。共享路径与已配置的 `host_path` 在本机一致时，存储工具会自动使用该本地路径。需要自定义本地映射或登录节点 SSH 时，将 `cfg/storage-access.example.yaml` 复制为 `.local/storage.yaml`，编辑后再把 `--storage-config /absolute/path/to/.local/storage.yaml` 加入 MCP 参数。
 
-在客户端的 MCP 设置中添加名为 `determined-compute` 的 stdio 服务。按客户端的配置格式填写以下命令和参数，并替换 `/absolute/path/to/repo` 与 `your-owner`：
+<a id="connect-a-stdio-mcp-client"></a>
+## 接入 stdio MCP 客户端
+
+按 MCP 客户端使用的语法添加以下服务。将所有示例值替换为本机绝对路径或实际部署参数：
 
 ```json
 {
-  "command": "/absolute/path/to/repo/.venv/bin/determined-compute-mcp",
+  "command": "/absolute/path/to/determined_cluster_mcp/.venv/bin/determined-compute-mcp",
   "args": [
-    "--profile", "/absolute/path/to/repo/.local/profile.yaml",
-    "--db", "/absolute/path/to/repo/.local/tasks.sqlite3",
+    "--profile", "/absolute/path/to/determined_cluster_mcp/.local/profile.yaml",
+    "--db", "/absolute/local/path/to/tasks.sqlite3",
     "--owner", "your-owner",
-    "--secrets-file", "/absolute/path/to/repo/.local/credentials.env",
+    "--secrets-file", "/absolute/path/to/determined_cluster_mcp/.local/credentials.env",
     "--verify-ssl"
   ]
 }
 ```
 
-请使用绝对路径。使用相同数据库和 owner 的会话共享任务记录；owner 是命名空间，不是认证机制。若存储访问依赖 SSH 认证代理，请通过客户端的环境设置，让 MCP 进程继承 `SSH_AUTH_SOCK`。
+`owner` 是本地任务命名空间，不用于身份认证；凭据决定所使用的 Determined 账户。需要 SSH 或私有 CA 时，将相应环境传给 stdio 进程，具体见下方故障排查文档。
 
-1. 为请求填写清晰的 `name` 和 `description`，再将 `request.json` 的内容传给 `compute_plan(request)`。
-2. 调用 `compute_launch(request, request_id)`，保存返回的 `task_id`。
-3. 使用 `compute_status(task_id)` 和 `compute_logs(task_id)` 跟进进度；调用 `compute_cancel(task_id)` 停止任务。
+<a id="documentation"></a>
+## 文档
 
-提交前默认检查可用容量并避免排队；确实需要排队时显式设置 `allow_queue: true`。重试同一次提交时复用原 `request_id`。如果无法确定是否提交成功，先检查已有任务，再决定后续操作。
+- [Agent 工作流](docs/agent-workflow.zh.md)：准备、规划、提交、跟踪和验收任务
+- [计算服务参考](docs/compute-service.zh.md)：配置、请求、工具、任务身份与恢复
+- [共享存储访问](docs/shared-storage-access.zh.md)：本地挂载、SSH、预览和传输
+- [可选咨询](docs/consultation.zh.md)：服务端 Codex 后端与模型配置
+- [故障排查](docs/troubleshooting.zh.md)：启动、认证、TLS、路径、容量和提交状态不确定
 
-如需管理同一 Determined 账户通过 WebUI、原生 CLI 或另一台设备创建的任务，先调用 `compute_discover(kind, limit=50, offset=0)`，再调用 `compute_adopt(kind, remote_id)`。发现操作只读，不登记也不提交任务。本地登记操作会核对当前集群和账户，返回本地 `task_id`，且绝不会重新启动远端任务。之后用该本地 ID 调用现有的状态、日志和取消工具。
-
-客户端可以直接用这些工具规划任务。服务端咨询默认关闭；如需启用可选的 Codex 后端并指定其模型，请参阅[咨询配置](docs/agent-workflow.md)。咨询后端的模型与客户端使用的模型分别配置。
-
-## 使用 CLI
-
-CLI 可以与 MCP 共用任务记录。将 `TASK_ID` 替换为提交时返回的 ID：
-
-```bash
-export DETERMINED_COMPUTE_PROFILE="$PWD/.local/profile.yaml"
-export DETERMINED_COMPUTE_DB="$PWD/.local/tasks.sqlite3"
-export DETERMINED_COMPUTE_OWNER="$USER"
-export DETERMINED_COMPUTE_SECRETS="$PWD/.local/credentials.env"
-export DET_VERIFY_SSL=true
-
-determined-compute plan --request-file .local/request.json
-determined-compute launch --request-file .local/request.json --request-id my-job-001
-determined-compute status TASK_ID
-determined-compute logs TASK_ID
-
-determined-compute discover command --limit 20 --offset 0
-determined-compute adopt command REMOTE_ID
-```
-
-更多用法见[请求示例](cfg/examples)、[服务参考](docs/compute-service.md)或 `determined-compute --help`。
+JSON CLI 用法可运行 `determined-compute --help` 查看。

@@ -1,181 +1,310 @@
-# Compute service guide
+# Compute service reference
 
-## Architecture
+[English](compute-service.md) | [简体中文](compute-service.zh.md)
 
-The service separates deterministic task control from optional agent advice:
+This document describes the configuration and public MCP interface of the local
+Determined compute service. For an agent-neutral sequence for preparing, launching,
+and checking work, see [Agent workflow](agent-workflow.md). For the optional
+server-side advice worker, see [Consultation backend](consultation.md).
+
+## Architecture and trust boundary
 
 ```mermaid
 flowchart LR
-    S[Any stdio MCP client] -->|owner fixed at startup| M[MCP tools]
+    U[Any local stdio MCP client] --> M[13 base MCP tools]
     M --> C[ComputeService]
-    C --> D[(local SQLite state DB)]
-    C --> A[Determined API adapter]
+    C --> D[(local SQLite database)]
+    C --> A[Determined API]
     A --> K[Determined cluster]
-    M -. explicitly enabled .-> W[read-only consultation]
-    W --> D
-    W --> X[Configured optional backend]
     P[compute profile] --> C
-    R[repo skill + request] --> X
-    H[mapped shared storage] <--> K
+    M --> S[shared-storage adapter]
+    S --> H[mapped shared storage]
+    M -. optional: 2 more tools .-> W[read-only consultation worker]
 ```
 
-`ComputeService` is the source of truth for task planning, idempotent launch, discovery/adoption, ownership checks, status, logs, cancellation, and conservative reconciliation. Its local `task_id` is stable across service restarts and is separate from any Determined `remote_id`. The SQLite file belongs on local durable storage; code, data, packages, checkpoints, logs, and outputs belong on mapped shared storage.
+The MCP server is a local stdio service for one trusted user. It binds `owner` at
+startup; no tool accepts an owner argument. Separate processes can use separate owner
+names with one database, while collaborators can deliberately share a name. This is a
+namespace boundary, not multi-user authentication. A remotely exposed service needs
+its own authenticated transport.
 
-The MCP server is a local stdio service for one trusted user. It binds `owner` when the process starts, so tools cannot claim another namespace. Separate sessions can use separate owner names against one database; deliberate collaboration can share a name. This boundary helps organize tasks but does not provide multi-user security. An exposed or remote service needs a separate transport and authentication design.
+`ComputeService` owns planning, idempotent submission, status, logs, cancellation,
+discovery, adoption, and conservative reconciliation. Its local `task_id` remains
+stable across restarts and is distinct from the Determined `remote_id`. Keep the SQLite
+database on durable local storage. Keep source, data, packages, checkpoints, logs, and
+outputs on mapped shared storage.
 
-The standard workflow is client and model independent: the caller plans with its own agent and invokes deterministic tools. Consultation is disabled by default. An operator can enable the optional Codex backend with a chosen model; its read-only worker receives the request and repository skill and persists its workflow state. Its advice does not launch or cancel work. See [consultation setup](agent-workflow.md).
+The default consultation backend is `none`. That mode registers 13 base tools and does
+not import the consultation worker, require Codex, or require a repository skill
+directory. Enabling the Codex backend adds `compute_consult` and `workflow_status`, for
+15 tools in total. Consultation is advisory and cannot submit or cancel work.
 
-## Profile
+## Compute profile
 
-Load a profile with `ComputeProfile.from_file(path)`. The schema is:
+Pass the profile with `--profile PATH` or `DETERMINED_COMPUTE_PROFILE`. Its schema is:
 
 ```yaml
 cluster_identity: optional-deployment-label
 mounts:
-  - host_path: /shared/path/on/agents
-    container_path: /path/inside/container
-  - host_path: /shared/reference/data
-    container_path: /reference/data
+  - host_path: /shared/projects
+    container_path: /workspace
+  - host_path: /shared/reference
+    container_path: /reference
     read_only: true
 defaults:
-  image: verified-image
-  pool: verified-pool
+  image: your-image
+  pool: your-pool
   slots: 1
 shell_inactivity_seconds: 7200
 ```
 
-Shared roots can include `/SSD`, `/SSD_home`, `/SSD_datasets`, `/SSD3`, `/SSD3_home`, `/SSD3_datasets`, and `/UNSAFE_SSD4`. Declare each available root in `mounts`; host paths refer to cluster agents and need not exist on the machine running the MCP client. The example profile maps these roots to the same container paths. Remove roots unavailable on your deployment.
+At least one mount is required. `host_path` is the path on cluster agents and need not
+exist on the MCP client machine. Requests use `container_path`; container roots cannot
+overlap, so each container path maps through one corresponding mount. When validating
+a host-path alias against overlapping host roots, the most specific root controls and
+read-only wins a tie. `workdir`, `output_dir`, and explicit checkpoint targets must be
+under writable mounts; reading reference data under a read-only mount remains valid.
+These checks are service policy and do not replace filesystem permissions.
 
-Mount mappings are required. A mount may set `read_only: true`; the generated Determined bind mount preserves that restriction. `workdir` and `output_dir` must resolve under writable mounts. Uploads and explicit checkpoint targets must also be writable; reading or fetching reference data remains allowed. Host-path aliases use the most-specific configured host root, with read-only taking precedence for equal matches. This is a service policy, not a replacement for filesystem permissions. Omitting `read_only` keeps the existing writable default. Image, pool, and slot values are deployment defaults and can be overridden by a request. `shell_inactivity_seconds` is optional and has no service default. The value is advisory; the service does not enforce shell idle timeouts.
+The image, resource pool, and slot count are defaults that a request can override.
+`slots` must be a non-negative integer; zero asks for CPU-only auxiliary capacity when
+the pool supports it. `shell_inactivity_seconds` is optional and advisory. The service
+does not enforce an idle timeout.
 
-## Request and mode selection
+`cluster_identity` is an optional operator-facing label. Submitted local records bind
+to the profile fingerprint and the resolved Determined endpoint, including this label.
+Changing that binding prevents later status, log, cancellation, and reconciliation
+operations on those records.
 
-A request can contain:
+## Request object and planning
 
-| Field | Type | Purpose |
+`compute_plan` and `compute_launch` accept the same request object:
+
+| Field | Type | Meaning |
 | --- | --- | --- |
-| `name`, `description` | string | Client-chosen display name and task purpose |
-| `allow_queue` | boolean | Explicitly permit queuing; defaults to false |
-| `kind` | `auto`, `command`, `shell`, `experiment` | Requested execution mode |
-| `interactive` | boolean | Makes auto mode choose `shell` |
-| `overnight` | boolean | Makes auto mode choose `experiment` |
-| `command` | string or string list | Workload command |
-| `workdir` | absolute container path | Working directory under a configured mount |
-| `output_dir` | absolute container path | Output directory under a configured mount |
-| `slots` | non-negative integer | Requested resource slots; zero is CPU-only if supported by the pool |
-| `pool`, `image` | string | Optional profile-default overrides |
-| `code_revision` | string | Revision/content identifier |
-| `experiment_config` | object | Experiment-specific options |
+| `name` | string | Optional display name, at most 128 characters |
+| `description` | string or null | Optional display description, at most 2,048 characters |
+| `allow_queue` | boolean | Allow submission when current capacity is insufficient; default `false` |
+| `kind` | `auto`, `command`, `shell`, or `experiment` | Execution mode; default `auto` |
+| `interactive` | boolean | Requires shell mode; in auto mode selects `shell` |
+| `overnight` | boolean | In auto mode selects `experiment` |
+| `command` | string or string array | Command or experiment entrypoint; shell mode rejects it |
+| `workdir` | absolute container path | Working directory under a writable configured mount |
+| `output_dir` | absolute container path | Output directory under a writable configured mount |
+| `slots` | non-negative integer | Requested slots; defaults to the profile value |
+| `pool`, `image` | string | Optional overrides of profile defaults |
+| `code_revision` | string or null | Caller-provided revision or content identifier |
+| `experiment_config` | object | Extra experiment configuration; requires experiment mode |
 
-Auto mode selects `shell` for interactive requests, `experiment` for overnight requests or those carrying `experiment_config`, and `command` otherwise. An explicit `kind` is preserved; for example, an overnight command remains a command and receives an experiment advisory. Use `command` for a one-off job expected to finish in a working session, `shell` for iterative debugging, and `experiment` for durable/overnight work or actual experiment features such as search, trial tracking, and checkpoint lifecycle.
+Unknown request fields and upload/context fields are rejected. In auto mode,
+`interactive` selects `shell`, then `overnight` or `experiment_config` selects
+`experiment`, and all other requests select `command`. An explicit `kind` is retained;
+an overnight command therefore stays a command and receives an advisory.
 
-`plan(request)` is offline and non-mutating. It returns the resolved `kind`, rendered `config`, `code_revision`, and `advisories`. Command and shell configs use `resources.slots`; experiments use `resources.slots_per_trial`. Planning must reject paths outside configured container mounts and source-upload fields. It does not authenticate, query the cluster, create projects, or launch work.
+Planning is offline and does not authenticate, inspect capacity, create projects, or
+submit work. It returns `kind`, `name`, `description`, `allow_queue`, rendered `config`,
+`code_revision`, and `advisories`. If `name` is omitted, the service creates one and
+adds an advisory. Commands and shells place the name on the first description line;
+experiments use their native name field. Top-level display metadata overrides matching
+experiment fields.
 
-New launches check current capacity in the requested pool unless `allow_queue: true` is explicit. GPU/CPU slot requests use schedulable agent slots; zero-slot tasks use auxiliary-container capacity. Insufficient or unknown capacity is reported before submission. `compute_resources(slots, pool)` and `determined-compute resources --slots N --pool POOL` expose the same live inventory. Alternative pools are suggestions, not automatic substitutions; capacity checks are snapshots, not reservations.
+Command and experiment entrypoints create `output_dir`, change to `workdir`, and then
+run the command through `/bin/bash -lc`. Command and shell configs use
+`resources.slots`; experiments use `resources.slots_per_trial`. The service supplies
+profile bind mounts and manages `COMPUTE_WORKDIR`, `COMPUTE_OUTPUT_DIR`,
+`COMPUTE_CODE_REVISION`, and the private submission marker. A request cannot override
+those variables or bind mounts.
 
-Names and descriptions are provided by the MCP client. Commands and shells show the name on the first line of their description; experiments use their native name field. The internal submission marker is kept in a reserved environment variable and does not replace user-visible text.
+Experiments require `command` or `experiment_config.entrypoint`, but not both. An
+explicit `checkpoint_storage` must have `type: shared_fs`, a writable mapped
+`host_path`, and an optional `storage_path` that remains inside that host path. Legacy
+`checkpoint_path` and `tensorboard_path` aliases are rejected. If checkpoint storage is
+omitted, Determined applies its cluster default, which offline planning cannot inspect.
 
-## Determined adapter behavior
+## Start the MCP server
 
-The adapter exposes one `launch_task(kind, config)` boundary. Command and shell launches send the generated config mapping. Experiment launches serialize that config as YAML and request activation. The adapter rejects upload aliases including file contexts, project roots, and model definitions before transport; it never creates a project automatically. Responses are normalized to an entity with an `id`, with API envelopes removed. Configuration retained for identity reconciliation is sanitized: credential-like fields and environment-variable collections are redacted.
-
-Command and shell cancellation use their task kill endpoint; experiment cancellation uses the experiment cancel endpoint. Command and shell logs come from the task log API. Experiment logs come from the highest numeric trial ID when trials exist. All log lists are returned oldest-to-newest for reading even though the API query asks for the latest records.
-
-## Shared-storage preparation
-
-Submissions carry path references only. Never populate an experiment `modelDefinition`, send a project archive, or use a project-root upload option. Place the complete runtime closure on mapped storage: source, configuration, data, locally supplied packages, checkpoints, logs, and expected artifacts.
-
-Use a revision-specific directory for unattended work, for example:
-
-```text
-/workspace/<user>/compute/runs/<project>/<revision>/
-  repo/
-  results/
-  checkpoints/
-```
-
-Set `workdir` and `output_dir` to the corresponding container paths and record `code_revision`. A mutable `/compute/debug/<project>` tree is appropriate for a shell. If directly syncing files, omit `--delete` and exclude `.env*`, `.secrets*`, credentials, tokens, caches, and project-specific secret files. The skill's [workflow reference](../skills/intensive-compute-runner/references/compute-workflow.md) contains a conservative template.
-
-## MCP operation
-
-Start a server with:
+Start one persistent stdio process per configured client:
 
 ```bash
 determined-compute-mcp \
   --profile /absolute/path/to/compute-profile.yaml \
-  --db /absolute/local/path/to/compute.sqlite3 \
-  --owner "$USER" \
-  --repo-root /absolute/path/to/this/repository
+  --db /absolute/local/path/to/tasks.sqlite3 \
+  --owner your-owner \
+  --secrets-file /absolute/path/to/credentials.env \
+  --verify-ssl
 ```
 
-Equivalent environment variables are `DETERMINED_COMPUTE_PROFILE`, `DETERMINED_COMPUTE_DB`, `DETERMINED_COMPUTE_OWNER`, and `DETERMINED_COMPUTE_REPO_ROOT`. The profile and database paths remain required in practice; keep credentials in the established Determined provider rather than these files.
+`--profile`, `--db`, and `--owner` correspond to
+`DETERMINED_COMPUTE_PROFILE`, `DETERMINED_COMPUTE_DB`, and
+`DETERMINED_COMPUTE_OWNER`. `--storage-config` corresponds to
+`DETERMINED_COMPUTE_STORAGE`; `--secrets-file` can instead be supplied through
+`DETERMINED_COMPUTE_SECRETS`. The API URL, token, and TLS verification default to
+`DET_MASTER`, `DET_API_TOKEN`, and `DET_VERIFY_SSL`; keep credentials in the existing
+provider or secrets file rather than the profile, database, tool arguments, or reports.
 
-After upgrading the service, restart every MCP process that shares the SQLite database so each process loads the new tools and additive database schema.
+The default database path used by the CLI is
+`~/.local/state/determined-compute/tasks.sqlite3`, but MCP deployments should specify
+an absolute local path. MCP rejects `:memory:`. After an upgrade, restart every MCP
+process that shares the database so all processes load the same tool set and additive
+schema.
 
-The tools are:
+Optional client-side access to mapped storage uses the same profile and a separate
+storage configuration. See [Shared-storage access](shared-storage-access.md).
 
-| Tool | Arguments | Result |
+## MCP API
+
+The base server exposes 13 tools. The `owner` below is always the startup-bound
+namespace and never a tool argument.
+
+| Tool | Arguments | Return value and effect |
 | --- | --- | --- |
-| `compute_resources` | optional `slots=1`, `pool` | Current scheduling capacity and candidate pools |
-| `storage_check` | `path` | Check a shared path locally or through the login node |
-| `storage_sync` | `local_dir`, `shared_dir`, optional `dry_run=true` | Preview or copy local files to shared storage |
-| `storage_fetch` | `shared_dir`, `local_dir`, optional `dry_run=true` | Preview or copy shared files locally |
-| `compute_plan` | `request` | Core plan object |
-| `compute_launch` | `request`, `request_id` | Persisted task object |
-| `compute_status` | `task_id` | Refreshed task object |
-| `compute_logs` | `task_id`, optional `tail=200` | Core log result |
-| `compute_cancel` | `task_id` | Updated task object |
-| `compute_reconcile` | `task_id`, `remote_id` | Safely bind a verified uncertain submission |
-| `compute_discover` | `kind`, optional `limit=50`, `offset=0` | List current-account remote tasks without registering them |
-| `compute_adopt` | `kind`, `remote_id` | Register an existing current-account remote task locally |
-| `compute_list_tasks` | none | Tasks in the startup-bound owner namespace |
-| `compute_consult` (optional) | `question`, `request_id`, optional `context` | Persisted workflow object |
-| `workflow_status` (optional) | `workflow_id` | Current persisted workflow object |
+| `compute_plan` | `request` | Offline normalized plan; no cluster or database mutation |
+| `compute_launch` | `request`, `request_id` | Persisted task record; may submit once |
+| `compute_status` | `task_id` | Local task record, refreshed remote state, and remote entity when bound |
+| `compute_logs` | `task_id`, optional `tail=200` | Chronological list of the newest remote log records |
+| `compute_cancel` | `task_id` | Updated record, remote cancellation response, and acknowledgement |
+| `compute_reconcile` | `task_id`, `remote_id` | Record bound only after marker verification |
+| `compute_list_tasks` | none | Local records in the bound owner namespace |
+| `compute_discover` | `kind`, optional `limit=50`, `offset=0` | One current-account remote page; no local mutation |
+| `compute_adopt` | `kind`, `remote_id` | Idempotently registered local record; no remote submission |
+| `compute_resources` | optional `slots=1`, `pool` | Current scheduler capacity and candidate pools |
+| `storage_check` | `path` | Access information for a mapped container path |
+| `storage_sync` | `local_dir`, `shared_dir`, optional `dry_run=true` | Preview or copy local directory contents to shared storage |
+| `storage_fetch` | `shared_dir`, `local_dir`, optional `dry_run=true` | Preview or copy shared directory contents locally |
 
-`compute_consult` and `workflow_status` are advertised only when a consultation backend is enabled. Standard compute and storage tools do not need a Codex installation, a consultation model or the repository skill files.
+`compute_consult(question, request_id, context?)` and
+`workflow_status(workflow_id)` appear only with an enabled consultation backend. Their
+configuration, lifecycle, and limits are in [Consultation backend](consultation.md).
 
-Launch requests may include an optional single-line `name`. Commands and shells use it
-as their Determined display description; experiments use it as the native experiment
-name. Top-level `name` and `description` override experiment-native metadata when supplied; otherwise the native values are retained. Display metadata is stored in SQLite and must not contain credentials.
+### Plan, capacity, and launch
 
-The owner is never a tool argument. On failure, MCP raises a tool error (`isError: true`) whose compact JSON content has the shape `{"error":{"code":"...","message":"...","retryable":false,"details":{...}}}`; `retryable` and `details` appear when available, and `structured_content` is null. Uncertain submission errors include their local task ID in details. Plan first, review resolved paths and advisories, and then launch with a stable request ID. Reusing that ID with identical content returns the established record; conflicting content is rejected.
+Call `compute_plan` first and review resolved paths, mode, image, pool, slots, and
+advisories. `compute_resources` is a live snapshot, not a reservation. Positive slot
+requests inspect schedulable agent slots; zero checks auxiliary-container capacity.
+Candidate pools are suggestions and are never substituted automatically.
 
-For a running shell, use the adapter's sanitized `reconnectCommand`, currently `det shell show_ssh_command <remote-id>`. The adapter removes `privateKey` from returned shell entities; do not copy private key material into task records, MCP context, or reports.
+`compute_launch` checks capacity unless `allow_queue` is explicitly true. Its
+`request_id` is an idempotency key within the bound owner. Repeating the same ID and
+equivalent request returns the established record. Reusing it with different content
+returns `idempotency_conflict`. Once a local row has claimed an ID, a retry cannot
+submit a second remote task, even after restart.
 
-## Discover and adopt existing remote tasks
+The adapter sends command and shell configs as mappings. It serializes experiment
+configs as YAML and requests activation. It rejects source upload aliases, never
+creates a project, removes API envelopes, sanitizes retained identity material, and
+returns an entity with an `id`.
 
-`compute_discover(kind, limit=50, offset=0)` performs a read-only, paginated query for tasks owned by the currently authenticated Determined account. `kind` is required and must be `command`, `shell`, or `experiment`; `limit` must be 1–100. Discovery neither writes a local task record nor submits a remote task.
+### Task records, status, logs, and cancellation
 
-Use discovery for tasks created through the Determined WebUI, native CLI, or another device using the same account. The CLI equivalent is:
+A public task record includes `task_id`, `request_id`, `owner`, `origin`, `kind`, local
+`state`, `remote_id`, `remote_state`, display metadata, paths, revision, cluster/account
+binding fields, an optional fixed `error_code`, and timestamps. Internal request hashes,
+profile hashes, and submission markers are never public. The service stores no full
+request body, generated config, API response, logs, or raw exception text in a task
+record.
 
-```bash
-determined-compute ... discover command --limit 20 --offset 0
+`compute_status` returns local state without contacting Determined when no remote ID is
+bound. Otherwise it fetches the entity, updates `remote_state`, and includes the
+sanitized entity as `remote`. A stale `pending` or `submitting` row becomes
+`submission_uncertain`; this never causes automatic resubmission.
+
+`compute_logs` requires a positive `tail`. Command and shell logs come from their task
+log API. Experiment logs come from the highest numeric trial ID; an experiment with no
+trials returns an empty list. Results are ordered oldest to newest. A task with no
+remote ID also returns an empty list.
+
+`compute_cancel` uses the task kill endpoint for commands and shells and the experiment
+cancel endpoint for experiments. It requires a bound remote ID and returns
+`cancellation_acknowledged: true` when the API call completes. Remote termination alone
+does not prove success; inspect exit information and expected shared-storage artifacts.
+
+For a running shell, use the sanitized `reconnectCommand`, currently
+`det shell show_ssh_command <remote-id>`. The adapter removes `privateKey`; never put
+private key material in task records, consultation context, or reports.
+
+### Discover and adopt
+
+`compute_discover` accepts `kind` equal to `command`, `shell`, or `experiment`. `limit`
+must be 1 through 100 and `offset` must be non-negative. It queries only tasks owned by
+the currently authenticated Determined account and returns the actual cluster ID,
+account identity, sanitized metadata, any matching `local_task_id`, and consistent
+pagination including `next_offset`. It neither writes a local record nor submits work.
+Command and shell remote IDs are UUIDs; experiment remote IDs are positive integers.
+
+`compute_adopt` fetches one remote task and verifies both its normalized ID and
+`userId` against `/me` before writing. Administrative visibility cannot be used to
+adopt another user's task. Registration identity is the local owner, actual cluster ID,
+kind, and remote ID; the record also binds and verifies the authenticated user ID. A
+previously submitted record in the same database is returned unchanged rather than
+replaced.
+
+New adopted records have `origin: "adopted"`, local `state: "adopted"`, and an internal
+adoption request ID. They retain only whitelisted identity, state, name, and description
+metadata. Unknown `workdir`, `output_dir`, and `code_revision` are exposed as `null`;
+the store does not infer them or retain raw remote configuration. Later status, logs,
+and cancellation re-check the actual cluster and account binding. Adopted tasks do not
+use the submitting profile as their authority and gain no storage permissions.
+
+Use discovery and adoption for work created by the WebUI, native CLI, or another device
+under the same account. Use reconciliation for a local submission whose acceptance was
+uncertain. An adopted task cannot be reconciled or used as a launch retry.
+
+### Reconciliation and recovery
+
+A transport timeout can leave remote acceptance unknown. The service preserves the
+local task and returns its `task_id` in error details. It does not resubmit that request
+automatically. `compute_reconcile(task_id, remote_id)` fetches the proposed entity and
+binds it only if its reserved `COMPUTE_SUBMISSION_MARKER` equals the local unguessable
+marker. A mismatch returns `identity_mismatch`. First-line description markers are
+considered only for migrated legacy records without stored display metadata.
+
+This marker separates reconciliation from adoption: an uncertain local submission with
+a matching marker must be reconciled, while an independently created remote task can be
+adopted. If evidence is unavailable, investigate rather than launching the same work
+again.
+
+Submitted local tasks remain bound to the original profile fingerprint and endpoint.
+Adopted tasks remain bound to the actual cluster ID and authenticated user ID. These
+checks prevent a changed profile or account from operating on an unrelated task.
+
+### Errors
+
+MCP failures use `isError: true`; their text content is compact JSON of this form:
+
+```json
+{"error":{"code":"invalid_request","message":"...","retryable":false,"details":{}}}
 ```
 
-`compute_adopt(kind, remote_id)` registers one discovered remote task in the startup-bound owner namespace. Before writing, the service reads the current `/me` user ID and `/info` cluster ID, fetches the remote task, and requires its `userId` to match the current account. An administrator cannot use adoption to claim another user's task. Remote authorization for later status, logs, and cancellation remains the authorization of the configured Determined account.
+`retryable` and `details` appear only when available, and structured content is null.
+Safe details can include the local task ID and capacity information. Authentication,
+permission, transport, and response-shape failures are errors rather than empty
+results. Error messages and reports may contain sanitized commands, paths, IDs, states,
+and error classes, but must not include credentials or secret-file contents.
 
-A newly adopted local record exposes `origin: "adopted"` and stores only safe identity/status metadata, including the available name and description. It does not persist raw remote configuration or credentials. If `workdir`, `output_dir`, or `code_revision` cannot be established safely, those fields remain empty rather than being inferred. Adoption grants no additional shared-storage access.
+## CLI equivalents
 
-Adoption is keyed by local owner, actual cluster ID, task kind, and remote ID. Repeating the same adoption returns the existing local `task_id`. A different local SQLite database registers the task independently; keep databases on local durable disk rather than shared NFS. Adopted records bind to the actual cluster and account identity, not to the launch profile. Existing locally launched records retain their original profile binding.
-
-After adoption, use the returned local ID with `compute_status`, `compute_logs`, or `compute_cancel`. Adoption does not accept an old `request_id` and never launches the remote task again. Its CLI equivalent is:
+The JSON CLI uses the same service boundaries and can share the database and owner with
+MCP. It accepts request JSON/YAML inline or from a file and wraps success as
+`{"ok":true,"result":...}` and failure as `{"ok":false,"error":...}`. The
+following is a complete short setup; replace `TASK_ID` and `REMOTE_ID` with returned
+identifiers:
 
 ```bash
-determined-compute ... adopt command REMOTE_ID
+export DETERMINED_COMPUTE_PROFILE="$PWD/.local/profile.yaml"
+export DETERMINED_COMPUTE_DB="$PWD/.local/tasks.sqlite3"
+export DETERMINED_COMPUTE_OWNER="$USER"
+export DETERMINED_COMPUTE_SECRETS="$PWD/.local/credentials.env"
+export DET_VERIFY_SSL=true
+
+determined-compute plan --request-file .local/request.json
+determined-compute launch --request-file .local/request.json --request-id my-job-001
+determined-compute status TASK_ID
+determined-compute logs TASK_ID
+
+determined-compute discover command --limit 20 --offset 0
+determined-compute adopt command REMOTE_ID
 ```
 
-`compute_reconcile` is not an adoption shortcut. Reconciliation repairs an existing local submission whose remote acceptance was uncertain and requires its submission marker to match. If an uncertain local submission already exists, use its local `task_id` with `compute_reconcile` instead of registering the remote task again. Use `compute_adopt` for an independently created remote task.
-
-## Failure and recovery rules
-
-Transport, authentication, permission, and response-shape failures are errors, not empty results. Authentication failure never causes local fallback. Task log calls request the newest records from Determined and return them in chronological order; an experiment with no trials returns an empty list.
-
-A network timeout during submission can leave acceptance uncertain. The service records that state and does not automatically resubmit, including after restart. MCP exposes `compute_reconcile(task_id, remote_id)` and the CLI exposes `determined-compute ... reconcile TASK_ID REMOTE_ID`. The core fetches that remote entity and binds it only when its unguessable submission marker matches the reserved `COMPUTE_SUBMISSION_MARKER` environment value; a mismatch fails with `identity_mismatch`. The API exposes only that validated marker while redacting other environment values. First-line description markers are supported only for migrated legacy records without stored display metadata. Without verified evidence, investigate before any new launch.
-
-Remote termination does not by itself prove success. Check exit information and the requested shared-storage artifacts or metrics before reporting completion. Reports may include sanitized commands, paths, task IDs, remote IDs, states, and errors; they must omit credential values and secret-file contents.
-
-For consultation worker setup and crash recovery, see [agent-workflow.md](agent-workflow.md).
-
-For local mounts, SSH agents, passwords, keyrings and connection reuse, see [shared-storage-access.md](shared-storage-access.md).
-
-An explicitly supplied `checkpoint_storage` must use `type: shared_fs` under writable profile roots. Its effective `storage_path` must remain inside `host_path`; legacy `checkpoint_path` and `tensorboard_path` aliases are rejected. If checkpoint storage is omitted, Determined uses its cluster default; the service cannot inspect that default during offline planning.
+For file staging and retrieval, use the separate
+[shared-storage guide](shared-storage-access.md). For the full agent sequence around
+these deterministic calls, use [Agent workflow](agent-workflow.md).
